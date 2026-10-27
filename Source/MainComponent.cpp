@@ -27,13 +27,21 @@ namespace
 MainComponent::MainComponent()
 {
     setOpaque (true);
-    setSize (1180, 720);
+    setSize (1280, 720);
 
     settings = SettingsIO::load (SettingsIO::getDefaultFile());
     StartupLog::mark ("ctor: settings loaded");
 
     addAndMakeVisible (devicePanel);
     addAndMakeVisible (alertBanner);
+    addAndMakeVisible (chainPanel);
+    addAndMakeVisible (bottomBar);
+
+    // The cards are the only place that edits the chain, and the bottom bar is
+    // the only place that edits the preset name; these two links keep them in
+    // step without either one knowing the other's layout.
+    chainPanel.onEdited = [this]() { bottomBar.refresh(); };
+    bottomBar.onPresetApplied = [this]() { chainPanel.refreshFromParams(); };
 
     devicePanel.onApiChanged = [this] (const juce::String& name) { audioApiChanged (name); };
     devicePanel.onInputChanged = [this] (const juce::String& name) { inputDeviceChanged (name); };
@@ -55,6 +63,12 @@ MainComponent::MainComponent()
 
     engine.setParams (settings.params);
     engine.setInputChannel (settings.inputChannel);
+
+    // The members were built before the settings file was read, so this is the
+    // first point at which the controls can show the saved sound.
+    chainPanel.refreshFromParams();
+    bottomBar.refresh();
+
     StartupLog::mark ("ctor: settings applied to the engine");
 
     // From here on a plug or unplug feeds the recovery timing instead of
@@ -134,6 +148,8 @@ MainComponent::~MainComponent()
 //==============================================================================
 AudioEngine& MainComponent::getEngine() noexcept              { return engine; }
 AppSettings& MainComponent::getSettings() noexcept            { return settings; }
+ChainPanel& MainComponent::getChainPanel() noexcept           { return chainPanel; }
+BottomBar& MainComponent::getBottomBar() noexcept             { return bottomBar; }
 bool MainComponent::isMuted() const                           { return settings.params.mute; }
 
 void MainComponent::settingsChanged()
@@ -150,6 +166,10 @@ void MainComponent::setMuted (bool muted)
     settings.params.mute = muted;
     engine.setParams (settings.params);
     settingsChanged();
+
+    // The bottom bar's MUTE button is one of several callers (tray and hotkey
+    // are the others), so it follows the state instead of owning it.
+    bottomBar.refresh();
 
     if (onMuteChanged != nullptr)
         onMuteChanged (muted);
@@ -176,6 +196,16 @@ void MainComponent::resized()
     alertBanner.setSlideTargetY (devicePanel.getBottom() + Theme::gapSmall);
 
     chainArea = area.reduced (Theme::pad, Theme::gapSmall);
+
+    auto chain = chainArea;
+    bottomBar.setBounds (chain.removeFromBottom (BottomBar::preferredHeight));
+    chain.removeFromBottom (Theme::gap);
+    chainPanel.setBounds (chain);
+
+    // The 1280 x 720 minimum is applied by MainWindow right after it adopts
+    // this component. Doing it here was not dependable: resized() need not run
+    // again after the window exists, so a window created at another size could
+    // be dragged below the size the eight cards need.
 }
 
 //==============================================================================
@@ -186,6 +216,12 @@ void MainComponent::timerCallback()
     // device being opened.
     if (deviceBusy)
         return;
+
+    // The audio thread publishes atomics; this timer is the only reader that
+    // touches the components, so the meters never work on the render thread.
+    const auto levels = engine.getLevels();
+    chainPanel.updateMeters (levels);
+    bottomBar.updateMeters (levels, engine.getRawInputPeakDb());
 
     const double now = juce::Time::getMillisecondCounterHiRes();
 

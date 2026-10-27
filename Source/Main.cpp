@@ -76,6 +76,19 @@ public:
             setContentOwned (new MainComponent(), true);
             setResizable (true, true);
 
+            // The cards need the full 1280 x 720 content area. setContentOwned
+            // has already sized the window from the content, so the limits can
+            // be applied here, before the user can grab an edge. Applying them
+            // from the content's resized() was not reliable: that may never run
+            // again once the window exists.
+            if (auto* content = getContentComponent())
+            {
+                const int frameWidth  = juce::jmax (0, getWidth() - content->getWidth());
+                const int frameHeight = juce::jmax (0, getHeight() - content->getHeight());
+
+                setResizeLimits (1280 + frameWidth, 720 + frameHeight, 10000, 10000);
+            }
+
             // Respect the content's own preferred size.
             centreWithSize (getWidth(), getHeight());
             setVisible (true);

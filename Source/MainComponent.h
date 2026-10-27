@@ -6,6 +6,8 @@
 #include "Platform/DeviceHotplug.h"
 #include "Session/Settings.h"
 #include "UI/AlertBanner.h"
+#include "UI/BottomBar.h"
+#include "UI/ChainPanel.h"
 #include "UI/DevicePanel.h"
 
 #include <functional>
@@ -46,6 +48,11 @@ public:
 
     void paint (juce::Graphics& g) override;
     void resized() override;
+
+    /// The chain panel lives here so Task 14's tray and hotkey can refresh the
+    /// view after changing mute from outside the window.
+    ChainPanel& getChainPanel() noexcept;
+    BottomBar& getBottomBar() noexcept;
 
 private:
     // Which alert is on screen, so recovering from one condition does not
@@ -99,6 +106,8 @@ private:
     AudioEngine engine;
     DevicePanel devicePanel;
     AlertBanner alertBanner;
+    ChainPanel chainPanel   { *this };
+    BottomBar bottomBar     { *this };
     DeviceHotplug deviceHotplug;
     DeviceRecovery deviceRecovery;
 
