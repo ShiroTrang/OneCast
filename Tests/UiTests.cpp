@@ -1,12 +1,14 @@
-// Unit tests for the knob readout: the text a knob prints and the text a user
-// may type into it. The helpers are pure, so no window or audio device is
-// needed.
+// Unit tests for the UI helpers: the knob readout (the text a knob prints and
+// the text a user may type into it) and the rule that decides whether the
+// options callout opens with its invalid-shortcut warning. Both helpers are
+// pure, so no window or audio device is needed.
 //
 //   cmake --build build --config Release --target OneCastTests
 //   build\OneCastTests_artefacts\Release\OneCastTests.exe ui
 
 #include <JuceHeader.h>
 
+#include "../Source/UI/HotkeyStatus.h"
 #include "../Source/UI/ValueText.h"
 
 #include <optional>
@@ -34,6 +36,34 @@ namespace
                      "\"" + text + "\" should not parse");
     }
 }
+
+class HotkeyStatusTests final : public juce::UnitTest
+{
+public:
+    HotkeyStatusTests() : juce::UnitTest ("Hotkey notice", "ui") {}
+
+    void runTest() override
+    {
+        beginTest ("invalid-shortcut notice follows saved text and registration");
+        {
+            // No saved shortcut at all is not a failure: a new installation
+            // must not open with a red warning.
+            expect (! HotkeyStatus::invalidNoticeVisible (false, false),
+                    "no saved hotkey must not warn");
+            expect (! HotkeyStatus::invalidNoticeVisible (false, true),
+                    "no saved hotkey must not warn even if a shortcut is held");
+
+            // Saved text that Windows did not take (invalid, or owned by
+            // another application) is exactly the case the label explains.
+            expect (HotkeyStatus::invalidNoticeVisible (true, false),
+                    "unregistered saved hotkey must warn");
+
+            // The normal launch: the saved text is the shortcut really held.
+            expect (! HotkeyStatus::invalidNoticeVisible (true, true),
+                    "registered saved hotkey must not warn");
+        }
+    }
+};
 
 class ValueTextTests final : public juce::UnitTest
 {
@@ -167,4 +197,5 @@ public:
     }
 };
 
+static HotkeyStatusTests hotkeyStatusTests;
 static ValueTextTests valueTextTests;

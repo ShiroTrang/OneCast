@@ -53,6 +53,10 @@ public:
     void setRunning   (bool isRunning);
     void setLatencyMs (float milliseconds);
 
+    /// The gear button's bounds in this panel, so the options callout's arrow
+    /// can point at it.
+    juce::Rectangle<int> getOptionsButtonBounds() const noexcept;
+
     //==========================================================================
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -65,8 +69,19 @@ public:
     std::function<void (InputChannel channel)> onChannelChanged;
     std::function<void (int bufferSize)> onBufferSizeChanged;
     std::function<void (const juce::String& outputId)> onOutputChanged;
+    std::function<void()> onOptionsClicked;
 
 private:
+    /// The top bar's gear button: a drawn cog next to the "Tuỳ chọn" label.
+    /// A plain text button would leave the familiar settings affordance to the
+    /// user's imagination, and an icon font would depend on what Windows has.
+    class OptionsButton : public juce::Button
+    {
+    public:
+        OptionsButton();
+        void paintButton (juce::Graphics&, bool, bool) override;
+    };
+
     void buildCombos();
     void resizedControls();
 
@@ -74,6 +89,7 @@ private:
     juce::Label apiLabel, deviceLabel, channelLabel, bufferLabel, outputLabel;
     juce::ComboBox apiCombo, inputCombo, channelCombo, bufferCombo, outputCombo;
     juce::Label latencyLabel;
+    OptionsButton optionsButton;
 
     juce::StringArray apiNames, inputNames, outputIds;
     juce::Array<int> bufferSizeList;

@@ -1,4 +1,6 @@
 #include "MainComponent.h"
+#include "Platform/AutoStart.h"
+#include "UI/OptionsPanel.h"
 #include "UI/Strings.h"
 #include "UI/Theme.h"
 #include "Diagnostics/StartupLog.h"
@@ -32,6 +34,21 @@ MainComponent::MainComponent()
     settings = SettingsIO::load (SettingsIO::getDefaultFile());
     StartupLog::mark ("ctor: settings loaded");
 
+    // The tray appears before any device is opened: the window can be closed
+    // (hidden) from that moment on, and Windows startup assumes a quiet launch.
+    trayIcon.onShowWindow = [this]() { if (onShowWindow != nullptr) onShowWindow(); };
+    trayIcon.onToggleMute = [this]() { setMuted (! isMuted()); };
+    trayIcon.onQuit = [this]() { if (onQuit != nullptr) onQuit(); };
+    trayIcon.setMuted (isMuted());
+    onMuteChanged = [this] (bool muted) { trayIcon.setMuted (muted); };
+    StartupLog::mark ("ctor: tray icon");
+
+    hotkey.onPressed = [this]() { setMuted (! isMuted()); };
+    applySavedHotkey();
+    StartupLog::mark ("ctor: mute hotkey");
+
+    reconcileStartWithWindows();
+
     addAndMakeVisible (devicePanel);
     addAndMakeVisible (alertBanner);
     addAndMakeVisible (chainPanel);
@@ -48,6 +65,7 @@ MainComponent::MainComponent()
     devicePanel.onChannelChanged = [this] (InputChannel channel) { inputChannelChanged (channel); };
     devicePanel.onBufferSizeChanged = [this] (int samples) { bufferSizeChanged (samples); };
     devicePanel.onOutputChanged = [this] (const juce::String& id) { outputDeviceChanged (id); };
+    devicePanel.onOptionsClicked = [this]() { showOptions(); };
 
     deviceHotplug.addListener (this);
 
@@ -129,6 +147,12 @@ MainComponent::~MainComponent()
     devicePanel.onChannelChanged = nullptr;
     devicePanel.onBufferSizeChanged = nullptr;
     devicePanel.onOutputChanged = nullptr;
+    devicePanel.onOptionsClicked = nullptr;
+
+    // The hidden hotkey window is destroyed with the member, but silencing the
+    // callback first makes sure a queued press cannot reach a half-torn-down
+    // component.
+    hotkey.onPressed = nullptr;
 
     deviceHotplug.removeListener (this);
     deviceHotplug.stop();
@@ -173,6 +197,100 @@ void MainComponent::setMuted (bool muted)
 
     if (onMuteChanged != nullptr)
         onMuteChanged (muted);
+}
+
+//==============================================================================
+bool MainComponent::applyMuteHotkey (const juce::String& text)
+{
+    const auto combo = GlobalHotkey::parse (text);
+
+    if (! combo.has_value())
+        return false;
+
+    // setHotkey leaves the old combination registered when Windows refuses the
+    // new one (another application owns it), so a shortcut that used to work
+    // keeps working.
+    if (! hotkey.setHotkey (text))
+        return false;
+
+    hotkeyRegistered = true;
+
+    // Store the canonical spelling, not what the user typed: the options field
+    // can then show exactly the keys Windows holds.
+    settings.muteHotkey = GlobalHotkey::format (*combo);
+    settingsChanged();
+    return true;
+}
+
+bool MainComponent::isMuteHotkeyRegistered() const noexcept
+{
+    return hotkeyRegistered;
+}
+
+void MainComponent::reconcileStartWithWindows()
+{
+    if (settings.startWithWindows)
+    {
+        // Write the entry again on every launch: a moved installation then
+        // starts from its new path, and the saved toggle keeps its promise.
+        if (! AutoStart::setEnabled (true))
+        {
+            // Windows refused (a policy, say). The toggle must show what will
+            // really happen at the next sign-in.
+            settings.startWithWindows = false;
+            settingsChanged();
+            StartupLog::mark ("autostart: settings on, but the Run entry could not be written");
+        }
+
+        return;
+    }
+
+    // No saved intent, but Windows has an entry (added by hand, or by an
+    // earlier build): the registry is the state Windows follows, so it wins.
+    if (AutoStart::isEnabled())
+    {
+        settings.startWithWindows = true;
+        settingsChanged();
+        StartupLog::mark ("autostart: Run entry exists, settings reconciled to on");
+    }
+}
+
+void MainComponent::applySavedHotkey()
+{
+    if (settings.muteHotkey.isEmpty())
+    {
+        StartupLog::mark ("hotkey: none configured");
+        return;
+    }
+
+    // The field keeps the saved text either way, so this flag is what the
+    // options callout uses to avoid presenting a refused shortcut as active.
+    hotkeyRegistered = hotkey.setHotkey (settings.muteHotkey);
+
+    if (hotkeyRegistered)
+    {
+        StartupLog::mark ("hotkey: registered " + hotkey.getHotkey());
+        return;
+    }
+
+    // parse() tells the two failures apart only for this log line: either way
+    // there is no shortcut until the user chooses another one in the options.
+    StartupLog::mark (GlobalHotkey::parse (settings.muteHotkey).has_value()
+                          ? "hotkey: saved shortcut is owned by another application"
+                          : "hotkey: saved shortcut is not valid");
+    StartupLog::flush();
+}
+
+void MainComponent::showOptions()
+{
+    auto content = std::make_unique<OptionsPanel> (*this);
+    content->setSize (OptionsPanel::preferredWidth, OptionsPanel::preferredHeight);
+
+    // Screen coordinates: the callout is a desktop window, so it cannot be
+    // clipped by the window edge and stays above the cards.
+    const auto target = devicePanel.localAreaToGlobal (devicePanel.getOptionsButtonBounds());
+
+    juce::CallOutBox::launchAsynchronously (std::move (content), target, nullptr);
 }
 
 //==============================================================================
