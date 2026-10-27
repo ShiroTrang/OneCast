@@ -17,8 +17,10 @@ public:
     ~WasapiOutputDevice();
 
     /** Start rendering audio from the given RingBuffer to the specified WASAPI
-        render endpoint. Pass an empty deviceId to use the system default output.
-        @param deviceId      WASAPI endpoint ID string (empty = default device)
+        render endpoint. An empty deviceId fails without opening anything: this
+        app must never render to the Windows default endpoint (the user's
+        headphones), only to the virtual cable the user chose.
+        @param deviceId      WASAPI endpoint ID string; empty is refused
         @param inputBuffer   RingBuffer to read from (must outlive this session)
         @param producerRate  Sample rate the producer writes at (e.g. JUCE device rate).
                              If non-zero and different from the endpoint's native rate,
@@ -42,6 +44,17 @@ public:
     int getSampleRate() const;
     int getNumChannels() const;
 
+    /** Backlog the render thread tries to hold in the ring, in producer frames.
+        Written by the render thread; safe to read from any thread. */
+    int getBacklogTargetFrames() const noexcept;
+
+    /** WASAPI's device period for the open stream, in milliseconds. Written by
+        the render thread; safe to read from any thread. */
+    double getDevicePeriodMs() const noexcept;
+
+    /** Underruns seen by the drift-compensated reader since the stream opened. */
+    int getUnderrunCount() const noexcept;
+
     struct DeviceInfo
     {
         juce::String id;
@@ -52,19 +65,54 @@ public:
     static std::vector<DeviceInfo> getAvailableDevices();
 
 private:
+    /// Every failure path publishes one of these instead of a juce::String:
+    /// the render thread must not allocate, and the message is only built from
+    /// the caller's thread in getErrorMessage().
+    enum class ErrorCode
+    {
+        none = 0,
+        noDeviceChosen,
+        comInitialization,
+        deviceEnumerator,
+        renderDevice,
+        activateAudioClient,
+        mixFormat,
+        initializeAudioClient,
+        setEventHandle,
+        renderClient,
+        bufferSize,
+        startAudioClient,
+        startTimedOut,
+        deviceDisconnected,
+        waitFailed
+    };
+
+    void setError (ErrorCode code, int detail = 0) noexcept;
     void renderThread (juce::String deviceId, RingBuffer* buffer, int producerRate);
 
     std::thread thread;
     HANDLE stopEvent   = nullptr;
     HANDLE renderEvent = nullptr;
 
+    // Signalled by the render thread once the endpoint is open and running, or
+    // once it has given up, so start() can report a vanished endpoint id
+    // synchronously instead of leaving it to the background thread.
+    HANDLE startEvent  = nullptr;
+
     std::atomic<bool> running     { false };
-    std::atomic<bool> error       { false };
     std::atomic<int>  sampleRate  { 0 };
     std::atomic<int>  numChannels { 0 };
     std::atomic<double> producerSampleRate { 0.0 };
     std::atomic<int>    producerBlockSize { 0 };
-    juce::String errorMessage;
+    std::atomic<int>    backlogTargetFrames { 0 };
+    std::atomic<double> devicePeriodMs { 0.0 };
+    std::atomic<int>    underrunCount { 0 };
+
+    // Published by the render thread with release ordering; errorDetail is the
+    // HRESULT or GetLastError value associated with the code. The reader loads
+    // the code with acquire ordering before using the detail.
+    std::atomic<int>    errorCode { (int) ErrorCode::none };
+    std::atomic<int>    errorDetail { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WasapiOutputDevice)
 };
