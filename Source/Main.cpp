@@ -3,7 +3,8 @@
 #include "UI/Theme.h"
 #include "Diagnostics/StartupLog.h"
 
-class OneCastApplication : public juce::JUCEApplication
+class OneCastApplication : public juce::JUCEApplication,
+                           private juce::Timer
 {
 public:
     /// Set by --minimized. Task 14 creates the window hidden when this is true
@@ -28,6 +29,8 @@ public:
                 testSignal = true;
             else if (args[i] == "--minimized")
                 startMinimized = true;
+            else if (args[i] == "--latency-log")
+                latencyLog = true;
             else if (args[i] == "--snapshot" && i + 1 < args.size())
                 snapshotPath = args[++i];
             else if (args[i] == "--snapshot-delay-ms" && i + 1 < args.size())
@@ -48,10 +51,17 @@ public:
 
         if (snapshotPath.isNotEmpty())
             scheduleSnapshot (snapshotPath, snapshotDelayMs);
+
+        // --latency-log: keep writing the render-deadline counters while the
+        // app runs so a probe run can be matched against them afterwards. The
+        // message thread does the I/O; the render thread only stores atomics.
+        if (latencyLog)
+            startTimer (10000);
     }
 
     void shutdown() override
     {
+        stopTimer();
         mainWindow.reset();
 
         // Every component that referenced it is gone by now.
@@ -95,6 +105,18 @@ public:
     };
 
 private:
+    void timerCallback() override
+    {
+        if (mainWindow == nullptr)
+            return;
+
+        if (auto* content = static_cast<MainComponent*> (mainWindow->getContentComponent()))
+        {
+            StartupLog::mark ("latency: " + content->getEngine().describeLatency());
+            StartupLog::flush();
+        }
+    }
+
     /// The screenshot is taken on the message thread after the window has had
     /// time to paint, then the app quits. The safe pointer keeps a closed
     /// window from being touched if the user got there first.
@@ -139,6 +161,9 @@ private:
     // Declared before mainWindow so it outlives every component that uses it.
     Theme::LookAndFeel themeLookAndFeel;
     std::unique_ptr<MainWindow> mainWindow;
+
+    /// Set by --latency-log.
+    bool latencyLog = false;
 };
 
 START_JUCE_APPLICATION (OneCastApplication)

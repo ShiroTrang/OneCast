@@ -32,9 +32,10 @@ public:
         @param deviceId      WASAPI endpoint ID string; empty is refused
         @param inputBuffer   RingBuffer to read from (must outlive this session)
         @param producerRate  Sample rate the producer writes at (e.g. JUCE device rate).
-                             If non-zero and different from the endpoint's native rate,
-                             WASAPI AUTOCONVERTPCM handles resampling. Pass 0 to use
-                             the endpoint's native mix format rate (legacy behaviour).
+                             The low-latency shared rung keeps the endpoint's mix
+                             rate and the drift-compensated reader converts; the
+                             legacy shared rung keeps AUTOCONVERTPCM. Pass 0 to use
+                             the endpoint's native mix format rate.
         @returns true on success, false on failure (check getErrorMessage()). */
     bool start (const juce::String& deviceId, RingBuffer& inputBuffer,
                 int producerRate = 0);
@@ -73,6 +74,19 @@ public:
 
     /** Underruns seen by the drift-compensated reader since the stream opened. */
     int getUnderrunCount() const noexcept;
+
+    /** Resyncs (large backlog drops) done by the drift-compensated reader. */
+    int getResyncCount() const noexcept;
+
+    /** Longest interval between consecutive render events since the stream
+        opened, in milliseconds, measured with QueryPerformanceCounter. */
+    double getMaxRenderGapMs() const noexcept;
+
+    /** Render events whose interval exceeded twice the device period. */
+    int getLateEventCount() const noexcept;
+
+    /** Failed GetBuffer or ReleaseBuffer calls on the render client. */
+    int getBufferErrorCount() const noexcept;
 
     struct DeviceInfo
     {
@@ -127,6 +141,14 @@ private:
     std::atomic<double> devicePeriodMs { 0.0 };
     std::atomic<int>    outputMode { (int) OutputMode::shared };
     std::atomic<int>    underrunCount { 0 };
+    std::atomic<int>    resyncCount { 0 };
+
+    // Render-deadline diagnostics, published by the render thread. A late
+    // event or a buffer error is counted, never logged: the loop may not touch
+    // the file system or build a string.
+    std::atomic<double> maxRenderGapMs { 0.0 };
+    std::atomic<int>    lateEventCount { 0 };
+    std::atomic<int>    bufferErrorCount { 0 };
 
     // Honest output latency, published by the render thread. The ring fill is
     // in producer frames and the endpoint padding in device frames, both

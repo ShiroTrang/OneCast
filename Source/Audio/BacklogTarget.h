@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <type_traits>
 #include <utility>
 
 /// Ring backlog target for the cable render thread: grows at once to cover a
@@ -26,12 +27,18 @@ public:
     /// @param producerBlockFrames  One engine block, in producer frames.
     /// @param marginMs             Jitter margin added above the covered request.
     /// @param shrinkAfterSeconds   How long a large request keeps the target up.
+    /// @param producerRate         The engine's rate, in Hz. The block is kept
+    ///                             in producer frames and converted to device
+    ///                             frames when the target is reported; 0 uses
+    ///                             the device rate (a ratio of one).
     void prepare (double deviceRate, int periodFrames, int producerBlockFrames,
-                  double marginMs = 1.5, double shrinkAfterSeconds = 5.0) noexcept
+                  double marginMs = 1.5, double shrinkAfterSeconds = 5.0,
+                  double producerRate = 0.0) noexcept
     {
         rate   = deviceRate > 1.0 ? deviceRate : 1.0;
         period = std::max (1, periodFrames);
         block  = std::max (0, producerBlockFrames);
+        producerRate_ = producerRate > 1.0 ? producerRate : 0.0;
         margin = std::max (0, (int) std::lround (rate * marginMs / 1000.0));
 
         // The window is a count of render events, one per device period.
@@ -98,16 +105,32 @@ public:
     }
 
     /// Target in device frames: covered request + margin + one producer block.
+    /// The block is converted here, not by the caller: the caller converts the
+    /// whole target to producer frames afterwards, and scaling the block twice
+    /// would size it by the ratio squared.
     int getTargetFrames() const noexcept
     {
-        return (int) std::lround (covered) + margin + block;
+        return (int) std::lround (covered) + margin + getBlockInDeviceFrames();
     }
 
-    /// The engine's block size can change while the stream stays open; the
-    /// request history and the one-period-per-second shrink limit stay put.
-    void setProducerBlockFrames (int frames) noexcept
+    /// The engine's block size, or its rate, can change while the stream stays
+    /// open; the request history and the one-period-per-second shrink limit
+    /// stay put.
+    void setProducerFormat (int blockFrames, double producerRate) noexcept
     {
-        block = std::max (0, frames);
+        block = std::max (0, blockFrames);
+        producerRate_ = producerRate > 1.0 ? producerRate : 0.0;
+    }
+
+    /// One engine block in device frames, i.e. after the producer/device ratio
+    /// conversion. The caller adds it to the target in producer frames, which
+    /// is exactly the un-scaled block the old code used.
+    int getBlockInDeviceFrames() const noexcept
+    {
+        if (producerRate_ <= 1.0)
+            return block;
+
+        return (int) std::lround ((double) block * rate / producerRate_);
     }
 
 private:
@@ -118,6 +141,9 @@ private:
     int    window       = 1;
     double dropPerEvent = 0.0;
     double dropBudget   = 0.0;
+    // Zero means the producer and device rates are the same, so the block
+    // needs no conversion.
+    double producerRate_ = 0.0;
 
     std::array<int, windowCapacity> history {};
     int    writeIndex = 0;

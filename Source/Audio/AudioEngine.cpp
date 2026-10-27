@@ -559,12 +559,20 @@ juce::String AudioEngine::describeLatency() const
                                  ? "sharedLowLatency"
                                  : "shared";
 
+    // Render-deadline diagnostics: a late event, a buffer error, an underrun or
+    // a reader resync explains a dropout the probe may hear. All are plain
+    // atomics published by the render thread.
     return "total=" + juce::String (inputMs + chainMs + outputMs, 1)
          + " ms in=" + juce::String (inputMs, 1)
          + " chain=" + juce::String (chainMs, 1)
          + " out=" + juce::String (outputMs, 1)
          + " mode=" + modeName
-         + " period=" + juce::String (output_.getDevicePeriodMs(), 1) + " ms";
+         + " period=" + juce::String (output_.getDevicePeriodMs(), 1) + " ms"
+         + " late=" + juce::String (output_.getLateEventCount())
+         + " maxGap=" + juce::String (output_.getMaxRenderGapMs(), 1) + " ms"
+         + " resync=" + juce::String (output_.getResyncCount())
+         + " underrun=" + juce::String (output_.getUnderrunCount())
+         + " bufErr=" + juce::String (output_.getBufferErrorCount());
 }
 
 int AudioEngine::getOutputUnderrunCount() const noexcept
