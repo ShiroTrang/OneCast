@@ -28,9 +28,27 @@ namespace
     /// of reach of a unit test.
     constexpr const wchar_t* hotkeyWindowClass = L"OneCastGlobalHotkeyWindow";
 
+    /// The hotkey window this process owns, or nullptr. Message-only windows of
+    /// every process hang under HWND_MESSAGE and the class name is the same in
+    /// all OneCast processes, so a running OneCast.exe (or another test run)
+    /// has windows of this class too: only one whose owning process is this one
+    /// may be counted or sent WM_HOTKEY, otherwise the test would fire the live
+    /// app's mute hotkey.
     HWND findHotkeyWindow()
     {
-        return FindWindowExW (HWND_MESSAGE, nullptr, hotkeyWindowClass, nullptr);
+        const auto ourProcess = GetCurrentProcessId();
+        HWND window = nullptr;
+
+        while ((window = FindWindowExW (HWND_MESSAGE, window, hotkeyWindowClass, nullptr)) != nullptr)
+        {
+            DWORD owner = 0;
+            GetWindowThreadProcessId (window, &owner);
+
+            if (owner == ourProcess)
+                return window;
+        }
+
+        return nullptr;
     }
 
     bool matches (const std::optional<GlobalHotkey::Combo>& combo, unsigned modifiers, unsigned virtualKey)
