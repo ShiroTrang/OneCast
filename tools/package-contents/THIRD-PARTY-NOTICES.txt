@@ -1,0 +1,110 @@
+================================================================
+  OneCast - THÔNG TIN BẢN QUYỀN & THÀNH PHẦN BÊN THỨ BA
+================================================================
+
+----------------------------------------------------------------
+JUCE  (bắt buộc đọc nếu bạn định phát tán bản này)
+----------------------------------------------------------------
+OneCast được xây dựng trên JUCE 8  (https://juce.com).
+
+JUCE 8 được phát hành theo MỘT TRONG HAI lựa chọn:
+   (a) Giấy phép AGPLv3  - miễn phí, NHƯNG có nghĩa vụ:
+       nếu bạn phát tán phần mềm này cho người khác (dù miễn phí
+       hay có thu tiền), bạn PHẢI cung cấp cho người nhận toàn bộ
+       mã nguồn tương ứng, kèm giấy phép AGPLv3.
+   (b) Giấy phép thương mại JUCE - trả phí, không có nghĩa vụ
+       công khai mã nguồn.
+
+Nếu bạn KHÔNG muốn công khai mã nguồn mà vẫn muốn gửi phần mềm
+này cho người khác, bạn cần mua giấy phép JUCE thương mại.
+Xem: https://juce.com/legal/juce-8-licence/
+
+Mã nguồn của dự án này:
+   https://github.com/ShiroTrang/OneCast
+   (Nếu bạn phát tán theo AGPLv3, hãy chắc chắn repo này là công
+    khai và chứa đúng phiên bản mã nguồn đã dùng để build.)
+
+JUCE tự đóng gói sẵn vài thư viện nhỏ (ví dụ zlib, libpng,
+libjpeg, FLAC, Ogg Vorbis). Mỗi thư viện có giấy phép riêng,
+đều thuộc loại cho phép phát tán kèm ứng dụng. Chi tiết nằm
+trong mã nguồn JUCE, thư mục modules\juce_core,
+modules\juce_graphics và modules\juce_audio_formats.
+
+----------------------------------------------------------------
+RNNoise  (khử ồn bằng AI, được biên dịch thẳng vào OneCast)
+----------------------------------------------------------------
+Chế độ khử ồn "AI" của OneCast dùng RNNoise 0.2 của Xiph.Org
+và Jean-Marc Valin (https://github.com/xiph/rnnoise), theo giấy
+phép BSD 3 điều khoản. Toàn văn giấy phép (bắt buộc phải đi kèm
+bản phát tán dạng chương trình):
+
+Copyright (c) 2007-2017, 2024 Jean-Marc Valin
+Copyright (c) 2023 Amazon
+Copyright (c) 2017, Mozilla
+Copyright (c) 2005-2017, Xiph.Org Foundation
+Copyright (c) 2003-2004, Mark Borgerding
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+- Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+- Neither the name of the Xiph.Org Foundation nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION
+OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+----------------------------------------------------------------
+ASIO  (chỉ dùng lúc build, SDK KHÔNG kèm theo)
+----------------------------------------------------------------
+ASIO is a trademark and software of Steinberg Media Technologies GmbH.
+
+OneCast hỗ trợ ASIO. Bản build này được biên dịch có kèm hỗ trợ
+ASIO, nhưng mã nguồn ASIO SDK của Steinberg KHÔNG được phát tán
+kèm theo vì lý do bản quyền.
+
+Ở thời điểm CHẠY, app không cần ASIO SDK. App chỉ dùng driver ASIO
+mà bạn đã cài sẵn trên máy (ví dụ driver của M-Audio M-Track).
+Không có driver ASIO thì app vẫn chạy bình thường bằng Windows
+Audio (WASAPI).
+
+----------------------------------------------------------------
+Microsoft Visual C++ Runtime  (đóng gói kèm)
+----------------------------------------------------------------
+Các file .dll sau (msvcp140.dll, vcruntime140.dll,
+vcruntime140_1.dll và các file cùng họ nếu có trong thư mục) được
+phép phát tán kèm ứng dụng theo "app-local deployment", như
+Microsoft quy định cho các ứng dụng build bằng Visual Studio.
+
+Các file này KHÔNG được sửa đổi. Nếu thiếu chúng, ứng dụng sẽ
+không khởi động. Bản đầy đủ của bộ runtime (nếu cần cài cho toàn
+hệ thống) có tại:
+   https://aka.ms/vc14/vc_redist.x64.exe
+
+----------------------------------------------------------------
+VB-Audio Virtual Cable  (KHÔNG kèm theo)
+----------------------------------------------------------------
+OneCast đưa giọng đã xử lý ra thiết bị "CABLE Input" của VB-Audio
+Virtual Cable (https://vb-audio.com/Cable), một sản phẩm riêng
+của VB-Audio Software. OneCast không chứa, không sửa và không
+phát tán phần mềm này. Bạn tự tải và cài đặt theo giấy phép của
+chính VB-Audio.
+
+================================================================
