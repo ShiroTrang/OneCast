@@ -1,13 +1,107 @@
 #include "WasapiOutputDevice.h"
+#include "BacklogTarget.h"
 #include "RingBuffer.h"
 #include "DriftCompensatedReader.h"
+#include "SharedStreamFormat.h"
+#include "../Diagnostics/StartupLog.h"
 #include <avrt.h>
+
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 
 #pragma comment(lib, "avrt.lib")
 
 #ifndef SAFE_RELEASE
 #define SAFE_RELEASE(p) do { if ((p) != nullptr) { (p)->Release(); (p) = nullptr; } } while (0)
 #endif
+
+namespace
+{
+    /// Sample layouts an exclusive stream may accept. Shared mode always uses
+    /// the mix format (32-bit float).
+    enum class PcmKind { float32, pcm24in32, pcm16 };
+
+    int bytesPerSample (PcmKind kind) noexcept
+    {
+        return kind == PcmKind::pcm16 ? 2 : 4;
+    }
+
+    const char* pcmKindName (PcmKind kind) noexcept
+    {
+        switch (kind)
+        {
+            case PcmKind::float32:   return "float32";
+            case PcmKind::pcm24in32: return "pcm24in32";
+            case PcmKind::pcm16:     return "pcm16";
+        }
+
+        return "unknown";
+    }
+
+    const char* modeName (WasapiOutputDevice::OutputMode mode) noexcept
+    {
+        switch (mode)
+        {
+            case WasapiOutputDevice::OutputMode::exclusive:        return "exclusive";
+            case WasapiOutputDevice::OutputMode::sharedLowLatency: return "sharedLowLatency";
+            case WasapiOutputDevice::OutputMode::shared:           return "shared";
+        }
+
+        return "unknown";
+    }
+
+    /// One stereo exclusive-mode candidate. 24-in-32 keeps 24 valid bits in a
+    /// 32-bit container (left-justified); 16-bit uses plain PCM because some
+    /// drivers only accept the classic header for that depth.
+    void fillExclusiveFormat (WAVEFORMATEXTENSIBLE& format, PcmKind kind, int rate) noexcept
+    {
+        std::memset (&format, 0, sizeof (format));
+
+        const int bytes = bytesPerSample (kind);
+
+        format.Format.nChannels       = 2;
+        format.Format.nSamplesPerSec  = (DWORD) rate;
+        format.Format.wBitsPerSample  = (WORD) (8 * bytes);
+        format.Format.nBlockAlign     = (WORD) (format.Format.nChannels * bytes);
+        format.Format.nAvgBytesPerSec = format.Format.nSamplesPerSec * format.Format.nBlockAlign;
+
+        if (kind == PcmKind::pcm16)
+        {
+            format.Format.wFormatTag = WAVE_FORMAT_PCM;
+            format.Samples.wValidBitsPerSample = 16;
+        }
+        else
+        {
+            format.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+            format.Format.cbSize = (WORD) (sizeof (WAVEFORMATEXTENSIBLE) - sizeof (WAVEFORMATEX));
+            format.Samples.wValidBitsPerSample = kind == PcmKind::pcm24in32 ? 24 : 32;
+            format.SubFormat = kind == PcmKind::float32 ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+                                                        : KSDATAFORMAT_SUBTYPE_PCM;
+            format.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+        }
+    }
+
+    REFERENCE_TIME framesToRefTime (int frames, int rate) noexcept
+    {
+        const auto safeRate = rate > 0 ? rate : 48000;
+        return (REFERENCE_TIME) (((long long) frames * 10000000LL) / safeRate);
+    }
+
+    /// Full scale stays at +/-32767 / +/-8388607: symmetric and below the
+    /// safety limiter's ceiling, so these conversions can never wrap.
+    int16_t toPcm16 (float sample) noexcept
+    {
+        return (int16_t) juce::roundToInt (juce::jlimit (-1.0f, 1.0f, sample) * 32767.0f);
+    }
+
+    int32_t toPcm24In32 (float sample) noexcept
+    {
+        // Times 256, not a left shift: shifting a negative int would be
+        // undefined, and every 24-bit value still fits the 32-bit container.
+        return (int32_t) (juce::roundToInt (juce::jlimit (-1.0f, 1.0f, sample) * 8388607.0f) * 256);
+    }
+}
 
 //==============================================================================
 WasapiOutputDevice::WasapiOutputDevice()
@@ -53,7 +147,16 @@ bool WasapiOutputDevice::start (const juce::String& deviceId, RingBuffer& inputB
     setError (ErrorCode::none);
     backlogTargetFrames.store (0, std::memory_order_relaxed);
     devicePeriodMs.store (0.0, std::memory_order_relaxed);
+    outputMode.store ((int) OutputMode::shared, std::memory_order_relaxed);
     underrunCount.store (0, std::memory_order_relaxed);
+    resyncCount.store (0, std::memory_order_relaxed);
+    maxRenderGapMs.store (0.0, std::memory_order_relaxed);
+    lateEventCount.store (0, std::memory_order_relaxed);
+    bufferErrorCount.store (0, std::memory_order_relaxed);
+    measuredRingFillFrames.store (0.0, std::memory_order_relaxed);
+    measuredPaddingFrames.store (0.0, std::memory_order_relaxed);
+    streamLatencyMs.store (0.0, std::memory_order_relaxed);
+    paddingValid.store (false, std::memory_order_relaxed);
     ResetEvent (stopEvent);
     ResetEvent (startEvent);
 
@@ -110,6 +213,14 @@ void WasapiOutputDevice::stop()
     // No stream, no output latency to report.
     backlogTargetFrames.store (0, std::memory_order_relaxed);
     devicePeriodMs.store (0.0, std::memory_order_relaxed);
+    resyncCount.store (0, std::memory_order_relaxed);
+    maxRenderGapMs.store (0.0, std::memory_order_relaxed);
+    lateEventCount.store (0, std::memory_order_relaxed);
+    bufferErrorCount.store (0, std::memory_order_relaxed);
+    measuredRingFillFrames.store (0.0, std::memory_order_relaxed);
+    measuredPaddingFrames.store (0.0, std::memory_order_relaxed);
+    streamLatencyMs.store (0.0, std::memory_order_relaxed);
+    paddingValid.store (false, std::memory_order_relaxed);
 }
 
 void WasapiOutputDevice::setProducerFormat (double rate, int blockSize)
@@ -192,9 +303,61 @@ double WasapiOutputDevice::getDevicePeriodMs() const noexcept
     return devicePeriodMs.load (std::memory_order_relaxed);
 }
 
+WasapiOutputDevice::OutputMode WasapiOutputDevice::getOutputMode() const noexcept
+{
+    return (OutputMode) outputMode.load (std::memory_order_relaxed);
+}
+
+double WasapiOutputDevice::getMeasuredLatencyMs() const noexcept
+{
+    if (! running.load (std::memory_order_relaxed))
+        return 0.0;
+
+    const double deviceRate = (double) sampleRate.load (std::memory_order_relaxed);
+    if (deviceRate <= 0.0)
+        return 0.0;
+
+    double producerRate = producerSampleRate.load (std::memory_order_relaxed);
+    if (producerRate <= 0.0)
+        producerRate = deviceRate;
+
+    // What is actually queued: the audio waiting in the ring plus the frames
+    // already sitting in the endpoint. The stream latency is only a fallback
+    // for endpoints that do not report padding, otherwise it would count the
+    // same buffering twice.
+    const double ringMs = 1000.0 * measuredRingFillFrames.load (std::memory_order_relaxed)
+                            / producerRate;
+    const double paddingMs = paddingValid.load (std::memory_order_relaxed)
+                               ? 1000.0 * measuredPaddingFrames.load (std::memory_order_relaxed)
+                                   / deviceRate
+                               : streamLatencyMs.load (std::memory_order_relaxed);
+
+    return ringMs + paddingMs;
+}
+
 int WasapiOutputDevice::getUnderrunCount() const noexcept
 {
     return underrunCount.load (std::memory_order_relaxed);
+}
+
+int WasapiOutputDevice::getResyncCount() const noexcept
+{
+    return resyncCount.load (std::memory_order_relaxed);
+}
+
+double WasapiOutputDevice::getMaxRenderGapMs() const noexcept
+{
+    return maxRenderGapMs.load (std::memory_order_relaxed);
+}
+
+int WasapiOutputDevice::getLateEventCount() const noexcept
+{
+    return lateEventCount.load (std::memory_order_relaxed);
+}
+
+int WasapiOutputDevice::getBufferErrorCount() const noexcept
+{
+    return bufferErrorCount.load (std::memory_order_relaxed);
 }
 
 //==============================================================================
@@ -345,7 +508,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         return;
     }
 
-    // ---- Activate audio client ----
+    // ---- Activate audio client and get the mix format ----
     hr = device->Activate (__uuidof (IAudioClient), CLSCTX_ALL,
                            nullptr, reinterpret_cast<void**> (&audioClient));
     if (FAILED (hr) || audioClient == nullptr)
@@ -356,7 +519,6 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         return;
     }
 
-    // ---- Get mix format ----
     hr = audioClient->GetMixFormat (&mixFormat);
     if (FAILED (hr) || mixFormat == nullptr)
     {
@@ -402,50 +564,302 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         mixFormat->nAvgBytesPerSec = mixFormat->nSamplesPerSec * mixFormat->nBlockAlign;
     }
 
-    const int nativeSampleRate  = static_cast<int> (mixFormat->nSamplesPerSec);
-    const int deviceChannels   = static_cast<int> (mixFormat->nChannels);
+    const int nativeSampleRate = static_cast<int> (mixFormat->nSamplesPerSec);
 
-    // If the producer writes at a different rate, override the format so that
-    // WASAPI's AUTOCONVERTPCM resamples transparently.
-    const bool needsResample = (producerRate > 0 && producerRate != nativeSampleRate);
+    // Rung 3 keeps the old behaviour: when the producer writes at a different
+    // rate, the stream format is at the producer rate and AUTOCONVERTPCM lets
+    // WASAPI resample to the endpoint's mix rate. Rung 2 must NOT do this (see
+    // chooseSharedStreamFormat): it keeps the original mix format below, and
+    // the drift-compensated reader's nominal ratio covers the difference.
+    SharedStreamFormat defaultSharedChoice = chooseSharedStreamFormat (false, nativeSampleRate, producerRate);
 
-    if (needsResample)
+    // A copy for rung 3, so mixFormat itself stays the endpoint's native
+    // format for the low-latency rung.
+    std::vector<BYTE> defaultSharedStorage;
+    WAVEFORMATEX* defaultSharedFormat = mixFormat;
+
+    if (defaultSharedChoice.convert)
     {
-        mixFormat->nSamplesPerSec  = static_cast<DWORD> (producerRate);
-        mixFormat->nBlockAlign     = static_cast<WORD> (mixFormat->nChannels * (mixFormat->wBitsPerSample / 8));
-        mixFormat->nAvgBytesPerSec = mixFormat->nSamplesPerSec * mixFormat->nBlockAlign;
+        const size_t formatBytes = sizeof (WAVEFORMATEX) + mixFormat->cbSize;
+        defaultSharedStorage.resize (formatBytes);
+        std::memcpy (defaultSharedStorage.data(), mixFormat, formatBytes);
+
+        auto* converted = reinterpret_cast<WAVEFORMATEX*> (defaultSharedStorage.data());
+        converted->nSamplesPerSec  = static_cast<DWORD> (defaultSharedChoice.rate);
+        converted->nBlockAlign     = static_cast<WORD> (converted->nChannels
+                                                        * (converted->wBitsPerSample / 8));
+        converted->nAvgBytesPerSec = converted->nSamplesPerSec * converted->nBlockAlign;
+        defaultSharedFormat = converted;
     }
 
-    const int deviceSampleRate = static_cast<int> (mixFormat->nSamplesPerSec);
-    const int frameSize        = static_cast<int> (mixFormat->nBlockAlign);
+    // ---- Choose the stream mode (ladder, highest quality of service first) ----
+    OutputMode mode      = OutputMode::shared;
+    PcmKind    kind      = PcmKind::float32;
+    int deviceSampleRate = 0;
+    int deviceChannels   = 2;
+    int frameSize        = 0;
+    int periodFrames     = 0;
+    UINT32 bufferSize    = 0;
+    HRESULT lastError    = AUDCLNT_E_UNSUPPORTED_FORMAT;
+    bool opened          = false;
 
-    sampleRate.store (deviceSampleRate);
-    numChannels.store (deviceChannels);
-
-    // ---- Initialize audio client (shared mode, event-driven) ----
-    REFERENCE_TIME defaultPeriod = 0;
-    REFERENCE_TIME minPeriod = 0;
-    audioClient->GetDevicePeriod (&defaultPeriod, &minPeriod);
-
-    DWORD streamFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
-    if (needsResample)
-        streamFlags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
-
-    hr = audioClient->Initialize (AUDCLNT_SHAREMODE_SHARED,
-                                  streamFlags,
-                                  defaultPeriod,
-                                  0,
-                                  mixFormat,
-                                  nullptr);
-    if (FAILED (hr))
+    // Initialize() succeeds at most once per client, so every rung starts
+    // from a freshly activated one. A refused format or mode then cannot
+    // poison the next attempt.
+    auto activateClient = [&]() -> HRESULT
     {
-        setError (ErrorCode::initializeAudioClient, (int) hr);
+        SAFE_RELEASE (audioClient);
+        return device->Activate (__uuidof (IAudioClient), CLSCTX_ALL,
+                                 nullptr, reinterpret_cast<void**> (&audioClient));
+    };
+
+    // ---- Rung 1: exclusive, event-driven, minimum device period ----
+    {
+        int rates[3] = { 0, 0, 0 };
+        int rateCount = 0;
+
+        auto addRate = [&] (int rate)
+        {
+            if (rate <= 0)
+                return;
+
+            for (int i = 0; i < rateCount; ++i)
+                if (rates[i] == rate)
+                    return;
+
+            if (rateCount < (int) (sizeof (rates) / sizeof (rates[0])))
+                rates[rateCount++] = rate;
+        };
+
+        addRate (producerRate);
+        addRate (48000);
+        addRate (44100);
+
+        const PcmKind kinds[] = { PcmKind::float32, PcmKind::pcm24in32, PcmKind::pcm16 };
+
+        for (int r = 0; r < rateCount && ! opened; ++r)
+        {
+            for (PcmKind candidate : kinds)
+            {
+                WAVEFORMATEXTENSIBLE format;
+                fillExclusiveFormat (format, candidate, rates[r]);
+
+                hr = activateClient();
+                if (FAILED (hr) || audioClient == nullptr)
+                {
+                    lastError = hr;
+                    continue;
+                }
+
+                REFERENCE_TIME defaultDevPeriod = 0, minDevPeriod = 0;
+                hr = audioClient->GetDevicePeriod (&defaultDevPeriod, &minDevPeriod);
+                if (FAILED (hr) || minDevPeriod <= 0)
+                {
+                    lastError = FAILED (hr) ? hr : AUDCLNT_E_UNSUPPORTED_FORMAT;
+                    continue;
+                }
+
+                // For exclusive mode the nearest-format output must be null;
+                // anything but S_OK means this exact format is not available.
+                const HRESULT supported = audioClient->IsFormatSupported (
+                    AUDCLNT_SHAREMODE_EXCLUSIVE, (WAVEFORMATEX*) &format, nullptr);
+
+                if (supported != S_OK)
+                {
+                    lastError = supported;
+                    continue;
+                }
+
+                REFERENCE_TIME period = minDevPeriod;
+                bool initialised = false;
+
+                for (int attempt = 0; attempt < 2; ++attempt)
+                {
+                    hr = audioClient->Initialize (AUDCLNT_SHAREMODE_EXCLUSIVE,
+                                                  AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                                                  period, period,
+                                                  (WAVEFORMATEX*) &format, nullptr);
+
+                    if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED)
+                    {
+                        // Standard realign-and-retry: the endpoint reports the
+                        // aligned buffer size and the duration follows from it.
+                        // The failed client is replaced first.
+                        UINT32 alignedFrames = 0;
+
+                        if (FAILED (audioClient->GetBufferSize (&alignedFrames))
+                            || alignedFrames == 0)
+                        {
+                            lastError = hr;
+                            break;
+                        }
+
+                        period = framesToRefTime ((int) alignedFrames, rates[r]);
+
+                        hr = activateClient();
+                        if (FAILED (hr) || audioClient == nullptr)
+                        {
+                            lastError = hr;
+                            break;
+                        }
+
+                        continue;
+                    }
+
+                    if (SUCCEEDED (hr))
+                        initialised = true;
+                    else
+                        lastError = hr;
+
+                    break;
+                }
+
+                if (! initialised)
+                    continue;
+
+                mode             = OutputMode::exclusive;
+                kind             = candidate;
+                deviceSampleRate = rates[r];
+                deviceChannels   = (int) format.Format.nChannels;
+                frameSize        = (int) format.Format.nBlockAlign;
+                opened           = true;
+                break;
+            }
+        }
+    }
+
+    // ---- Rung 2: shared low-latency (IAudioClient3, minimum engine period) ----
+    if (! opened)
+    {
+        hr = activateClient();
+
+        if (FAILED (hr) || audioClient == nullptr)
+        {
+            lastError = hr;
+        }
+        else
+        {
+            IAudioClient3* client3 = nullptr;
+            hr = audioClient->QueryInterface (__uuidof (IAudioClient3),
+                                              reinterpret_cast<void**> (&client3));
+
+            if (SUCCEEDED (hr) && client3 != nullptr)
+            {
+                UINT32 sharedDefault = 0, fundamental = 0, sharedMin = 0, sharedMax = 0;
+
+                // The low-latency engine period is queried with, and the
+                // stream opened with, the endpoint's original mix format. A
+                // producer-rate format would be refused here, which used to
+                // push every rate mismatch down to the 10 ms rung.
+                const SharedStreamFormat lowLatencyChoice =
+                    chooseSharedStreamFormat (true, nativeSampleRate, producerRate);
+
+                hr = client3->GetSharedModeEnginePeriod ((WAVEFORMATEX*) mixFormat,
+                                                         &sharedDefault, &fundamental,
+                                                         &sharedMin, &sharedMax);
+
+                if (SUCCEEDED (hr) && sharedMin > 0)
+                {
+                    // No AUTOCONVERTPCM: IAudioClient3 shared streams do not
+                    // accept it, and the reader's nominal ratio already handles
+                    // a producer/device rate difference.
+                    DWORD flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+
+                    if (lowLatencyChoice.convert)
+                        flags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                               | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+
+                    hr = client3->InitializeSharedAudioStream (flags, sharedMin,
+                                                               (WAVEFORMATEX*) mixFormat,
+                                                               nullptr);
+
+                    if (SUCCEEDED (hr))
+                    {
+                        mode             = OutputMode::sharedLowLatency;
+                        kind             = PcmKind::float32;
+                        deviceSampleRate = lowLatencyChoice.rate;
+                        deviceChannels   = (int) mixFormat->nChannels;
+                        frameSize        = (int) mixFormat->nBlockAlign;
+                        periodFrames     = (int) sharedMin;
+                        opened           = true;
+                    }
+                    else
+                    {
+                        lastError = hr;
+                    }
+                }
+                else
+                {
+                    lastError = FAILED (hr) ? hr : AUDCLNT_E_UNSUPPORTED_FORMAT;
+                }
+            }
+            else
+            {
+                lastError = FAILED (hr) ? hr : E_NOINTERFACE;
+            }
+
+            SAFE_RELEASE (client3);
+        }
+    }
+
+    // ---- Rung 3: shared, default period (the previous behaviour) ----
+    if (! opened)
+    {
+        hr = activateClient();
+        if (FAILED (hr) || audioClient == nullptr)
+        {
+            setError (ErrorCode::activateAudioClient, (int) hr);
+            running.store (false, std::memory_order_release);
+            cleanup();
+            return;
+        }
+
+        REFERENCE_TIME defaultPeriod = 0, minPeriod = 0;
+        hr = audioClient->GetDevicePeriod (&defaultPeriod, &minPeriod);
+        if (FAILED (hr))
+        {
+            setError (ErrorCode::initializeAudioClient, (int) hr);
+            running.store (false, std::memory_order_release);
+            cleanup();
+            return;
+        }
+
+        DWORD streamFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        if (defaultSharedChoice.convert)
+            streamFlags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+
+        hr = audioClient->Initialize (AUDCLNT_SHAREMODE_SHARED,
+                                      streamFlags,
+                                      defaultPeriod,
+                                      0,
+                                      defaultSharedFormat,
+                                      nullptr);
+        if (FAILED (hr))
+        {
+            setError (ErrorCode::initializeAudioClient, (int) hr);
+            running.store (false, std::memory_order_release);
+            cleanup();
+            return;
+        }
+
+        mode             = OutputMode::shared;
+        kind             = PcmKind::float32;
+        deviceSampleRate = defaultSharedChoice.rate;
+        deviceChannels   = (int) defaultSharedFormat->nChannels;
+        frameSize        = (int) defaultSharedFormat->nBlockAlign;
+        periodFrames     = juce::jmax (1, (int) (defaultPeriod * deviceSampleRate / 10000000));
+        opened           = true;
+    }
+
+    if (! opened || audioClient == nullptr)
+    {
+        setError (ErrorCode::initializeAudioClient, (int) lastError);
         running.store (false, std::memory_order_release);
         cleanup();
         return;
     }
 
-    // ---- Set event handle ----
+    // ---- Set event handle and get the render client ----
     hr = audioClient->SetEventHandle (renderEvent);
     if (FAILED (hr))
     {
@@ -455,7 +869,6 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         return;
     }
 
-    // ---- Get render client ----
     hr = audioClient->GetService (__uuidof (IAudioRenderClient),
                                   reinterpret_cast<void**> (&renderClient));
     if (FAILED (hr) || renderClient == nullptr)
@@ -466,8 +879,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         return;
     }
 
-    // ---- Get endpoint buffer size ----
-    UINT32 bufferSize = 0;
+    // ---- Get the endpoint buffer size ----
     hr = audioClient->GetBufferSize (&bufferSize);
     if (FAILED (hr) || bufferSize == 0)
     {
@@ -476,6 +888,28 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         cleanup();
         return;
     }
+
+    // An exclusive event fires once per aligned endpoint buffer, so that is
+    // the period actually in use. The shared rungs already know theirs.
+    if (mode == OutputMode::exclusive)
+        periodFrames = (int) bufferSize;
+
+    periodFrames = juce::jmax (1, periodFrames);
+
+    REFERENCE_TIME streamLatency = 0;
+    if (FAILED (audioClient->GetStreamLatency (&streamLatency)))
+        streamLatency = 0;
+
+    const double periodMs = 1000.0 * periodFrames / (double) deviceSampleRate;
+
+    sampleRate.store (deviceSampleRate);
+    numChannels.store (deviceChannels);
+    outputMode.store ((int) mode);
+    devicePeriodMs.store (periodMs);
+    streamLatencyMs.store (streamLatency / 10000.0);
+    paddingValid.store (false);
+    measuredRingFillFrames.store (0.0);
+    measuredPaddingFrames.store (0.0);
 
     // ---- Pre-fill with silence ----
     {
@@ -490,7 +924,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
     // ---- Allocate temporary per-channel read buffers ----
     // Used to read from the RingBuffer (which stores per-channel data) and
-    // then interleave into the WASAPI output buffer.
+    // then interleave into the WASAPI output buffer. The format conversion
+    // below also happens outside the wait, so nothing here allocates again.
     std::vector<std::vector<float>> tempChannelBuffers (static_cast<size_t> (deviceChannels));
     for (auto& ch : tempChannelBuffers)
         ch.resize (static_cast<size_t> (bufferSize), 0.0f);
@@ -505,23 +940,48 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     // grew for the whole session - and it also drops whatever the engine
     // wrote before this stream was live.
     //
-    // The backlog is kept as small as the two clocks allow: each render event
-    // asks for about one device period, the engine delivers in blocks, so hold
-    // the largest request seen + one engine block + 2 ms of jitter margin.
-    // Recomputed every event: the engine's block size can change, and a
-    // driver that asks for more than one period at a time must not underrun.
-    const int periodFrames = juce::jmax (1, static_cast<int> (defaultPeriod * deviceSampleRate / 10000000));
-    int largestRequest = periodFrames;
-    int eventsSeen = 0;
+    // The backlog target is the largest request of the last few seconds plus
+    // a small margin; it grows at once for a large endpoint request and then
+    // shrinks back, so one burst no longer costs latency for the session.
+    const double initialProducerRate = producerSampleRate.load (std::memory_order_relaxed);
+    const double initialRatio = initialProducerRate > 0.0
+                                  ? initialProducerRate / (double) deviceSampleRate
+                                  : 1.0;
 
-    // The engine's latency budget needs to know how long WASAPI holds a
-    // period of audio, even before the first render event arrives.
-    devicePeriodMs.store (1000.0 * periodFrames / deviceSampleRate,
-                          std::memory_order_relaxed);
+    // BacklogTarget keeps the block in producer frames and converts it to
+    // device frames itself; the target as a whole is then converted back to
+    // producer frames here, so the block is not scaled twice.
+    BacklogTarget backlog;
+    backlog.prepare ((double) deviceSampleRate, periodFrames,
+                     producerBlockSize.load (std::memory_order_relaxed),
+                     1.5, 5.0, initialProducerRate);
+
+    const int initialTarget = (int) std::lround (backlog.getTargetFrames() * initialRatio);
+
+    // The engine was already running while this stream opened, so the ring
+    // holds audio the listener never heard. Playing it now would only add its
+    // age to the output latency, and the drift reader would trim it only above
+    // its 100 ms resync cliff (and then at 0.2 % per second). Cut it to the
+    // starting target here, before the stream starts.
+    {
+        const int staleFrames = buffer->getAvailableForRead() - initialTarget;
+        if (staleFrames > 0)
+            buffer->discard (staleFrames);
+    }
+
+    backlogTargetFrames.store (initialTarget, std::memory_order_relaxed);
 
     DriftCompensatedReader reader;
     reader.prepare (buffer->getNumChannels(), static_cast<int> (bufferSize),
-                    static_cast<double> (deviceSampleRate), periodFrames);
+                    static_cast<double> (deviceSampleRate), initialTarget);
+
+    // Before the real-time loop, not inside it: this is the one place the
+    // render thread may build a string.
+    StartupLog::mark ("output: mode=" + juce::String (modeName (mode))
+                      + " format=" + juce::String (pcmKindName (kind))
+                      + " " + juce::String (deviceChannels) + " ch "
+                      + juce::String (deviceSampleRate) + " Hz period="
+                      + juce::String (periodMs, 2) + " ms");
 
     // ---- Start the stream ----
     hr = audioClient->Start();
@@ -543,6 +1003,23 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     // ---- Render loop ----
     HANDLE events[] = { stopEvent, renderEvent };
 
+    double ringFillEstimate = 0.0;
+    double paddingEstimate  = 0.0;
+    constexpr double smoothingSeconds = 0.5;
+    int eventsSeen = 0;
+
+    // Deadline diagnostics. QueryPerformanceCounter reads a per-process
+    // counter without a syscall, so it is safe inside the loop.
+    LARGE_INTEGER qpcFrequency {};
+    QueryPerformanceFrequency (&qpcFrequency);
+    LARGE_INTEGER previousEventQpc {};
+    bool havePreviousEvent = false;
+
+    const double lateThresholdMs = 2.0 * periodMs;
+    double maxGapMs = 0.0;
+    int lateEvents = 0;
+    int bufferErrors = 0;
+
     while (true)
     {
         DWORD result = WaitForMultipleObjects (2, events, FALSE, 2000);
@@ -556,6 +1033,35 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         if (result == WAIT_OBJECT_0 + 1)
         {
             // Render event: WASAPI wants more audio data.
+            LARGE_INTEGER eventQpc {};
+            QueryPerformanceCounter (&eventQpc);
+
+            // The first event only starts the clock: there is no previous
+            // render event to measure a gap against, and the interval since
+            // the loop began includes thread setup.
+            if (havePreviousEvent)
+            {
+                const double gapMs = qpcFrequency.QuadPart > 0
+                                       ? 1000.0 * (double) (eventQpc.QuadPart - previousEventQpc.QuadPart)
+                                           / (double) qpcFrequency.QuadPart
+                                       : 0.0;
+
+                if (gapMs > maxGapMs)
+                {
+                    maxGapMs = gapMs;
+                    maxRenderGapMs.store (maxGapMs, std::memory_order_relaxed);
+                }
+
+                if (gapMs > lateThresholdMs)
+                    lateEventCount.store (++lateEvents, std::memory_order_relaxed);
+            }
+            else
+            {
+                havePreviousEvent = true;
+            }
+
+            previousEventQpc = eventQpc;
+
             UINT32 padding = 0;
             hr = audioClient->GetCurrentPadding (&padding);
 
@@ -582,24 +1088,44 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
             }
 
             if (FAILED (hr) || data == nullptr)
+            {
+                bufferErrorCount.store (++bufferErrors, std::memory_order_relaxed);
                 continue;
+            }
 
-            // Read per-channel data from the ring buffer, then interleave
-            // into the WASAPI output buffer.
-            float* outputFloat = reinterpret_cast<float*> (data);
             const int framesToRead = static_cast<int> (available);
 
             const double currentProducerRate = producerSampleRate.load (std::memory_order_relaxed);
             const double nominalRatio = currentProducerRate > 0.0 ? currentProducerRate / deviceSampleRate : 1.0;
 
-            // The first few events after Start() can be irregular.
-            if (++eventsSeen > 3)
-                largestRequest = juce::jmax (largestRequest, framesToRead);
+            // Honest queue measurement, taken before this read consumes
+            // anything: what is in the ring plus what the endpoint has not
+            // played yet. One-pole smoothed so a single event does not make
+            // the latency label jump.
+            const int ringFill = buffer->getAvailableForRead();
+            const double smoothing = 1.0 - std::exp (-(double) framesToRead
+                                                     / (smoothingSeconds * (double) deviceSampleRate));
 
-            // Target in producer frames (that is what the ring holds).
-            const int targetFrames = static_cast<int> ((largestRequest + deviceSampleRate * 0.002)
-                                                       * nominalRatio)
-                                   + producerBlockSize.load (std::memory_order_relaxed);
+            ringFillEstimate += ((double) ringFill - ringFillEstimate) * smoothing;
+            paddingEstimate  += ((double) padding  - paddingEstimate)  * smoothing;
+
+            measuredRingFillFrames.store (ringFillEstimate, std::memory_order_relaxed);
+            measuredPaddingFrames.store (paddingEstimate, std::memory_order_relaxed);
+            paddingValid.store (true, std::memory_order_relaxed);
+
+            // The target is in producer frames because that is what the ring
+            // holds; the nominal ratio converts from device frames. The block
+            // and the ratio are refreshed together in case the engine changed.
+            backlog.setProducerFormat (producerBlockSize.load (std::memory_order_relaxed),
+                                       currentProducerRate);
+
+            // The first events after Start() can ask for a whole buffer while
+            // the endpoint is still priming; treating that as the steady
+            // request would raise the target for the whole session.
+            if (++eventsSeen > 3)
+                backlog.onRequest (framesToRead);
+
+            const int targetFrames = (int) std::lround (backlog.getTargetFrames() * nominalRatio);
             reader.setTargetFill (targetFrames);
             backlogTargetFrames.store (targetFrames, std::memory_order_relaxed);
 
@@ -608,15 +1134,37 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
             reader.read (*buffer, tempChannelPtrs.data(), deviceChannels,
                          framesToRead, nominalRatio);
             underrunCount.store (reader.getUnderrunCount(), std::memory_order_relaxed);
+            resyncCount.store (reader.getResyncCount(), std::memory_order_relaxed);
 
-            // Interleave the per-channel data into the output buffer.
-            for (int i = 0; i < framesToRead; ++i)
+            // Interleave the per-channel data into the output buffer, in the
+            // format the stream actually accepted.
+            if (kind == PcmKind::float32)
             {
-                for (int ch = 0; ch < deviceChannels; ++ch)
-                    outputFloat[i * deviceChannels + ch] = tempChannelPtrs[static_cast<size_t> (ch)][i];
+                float* outputFloat = reinterpret_cast<float*> (data);
+
+                for (int i = 0; i < framesToRead; ++i)
+                    for (int ch = 0; ch < deviceChannels; ++ch)
+                        outputFloat[i * deviceChannels + ch] = tempChannelPtrs[(size_t) ch][i];
+            }
+            else if (kind == PcmKind::pcm16)
+            {
+                auto* outputPcm = reinterpret_cast<int16_t*> (data);
+
+                for (int i = 0; i < framesToRead; ++i)
+                    for (int ch = 0; ch < deviceChannels; ++ch)
+                        outputPcm[i * deviceChannels + ch] = toPcm16 (tempChannelPtrs[(size_t) ch][i]);
+            }
+            else
+            {
+                auto* outputPcm = reinterpret_cast<int32_t*> (data);
+
+                for (int i = 0; i < framesToRead; ++i)
+                    for (int ch = 0; ch < deviceChannels; ++ch)
+                        outputPcm[i * deviceChannels + ch] = toPcm24In32 (tempChannelPtrs[(size_t) ch][i]);
             }
 
-            renderClient->ReleaseBuffer (available, 0);
+            if (FAILED (renderClient->ReleaseBuffer (available, 0)))
+                bufferErrorCount.store (++bufferErrors, std::memory_order_relaxed);
         }
         else if (result == WAIT_TIMEOUT)
         {
