@@ -58,6 +58,12 @@ public:
     /// previously registered shortcut then stays in place.
     bool applyMuteHotkey (const juce::String& text);
 
+    /// Whether Windows currently holds a mute shortcut for this process. The
+    /// settings keep the saved text even when launch registration failed, so
+    /// the options callout needs this to tell a working shortcut from a stale
+    /// line of text.
+    bool isMuteHotkeyRegistered() const noexcept;
+
     void paint (juce::Graphics& g) override;
     void resized() override;
 
@@ -129,6 +135,10 @@ private:
     DeviceRecovery deviceRecovery;
     TrayIcon trayIcon;
     GlobalHotkey hotkey;
+
+    /// True only while Windows really holds a mute shortcut. It stays true
+    /// when a later edit is refused, because the old shortcut remains active.
+    bool hotkeyRegistered = false;
 
     /// The device to bring back after an unplug, and what the output was called
     /// for the banner while it is away.

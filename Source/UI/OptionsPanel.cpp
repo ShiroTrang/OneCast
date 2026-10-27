@@ -2,6 +2,7 @@
 #include "../Diagnostics/StartupLog.h"
 #include "../MainComponent.h"
 #include "../Platform/AutoStart.h"
+#include "HotkeyStatus.h"
 #include "Strings.h"
 #include "Theme.h"
 
@@ -36,13 +37,20 @@ OptionsPanel::OptionsPanel (MainComponent& owner)
     hotkeyEditor.onReturnKey = [this]() { applyHotkey(); };
     addAndMakeVisible (hotkeyEditor);
 
-    // Always laid out, shown only after a refused combination: switching its
-    // visibility keeps the callout the same size instead of jumping.
+    // Always laid out, shown only while it is true: switching its visibility
+    // keeps the callout the same size instead of jumping. addChildComponent,
+    // not addAndMakeVisible, because that call would make it visible before
+    // the initial state below has been decided.
     hotkeyError.setText (Strings::hotkeyInvalid(), juce::dontSendNotification);
     Theme::styleLabel (hotkeyError, Theme::danger, 11.5f,
                        juce::Justification::topLeft);
-    hotkeyError.setVisible (false);
-    addAndMakeVisible (hotkeyError);
+    addChildComponent (hotkeyError);
+
+    // A saved shortcut that Windows refused at launch is still the text in the
+    // field, so say right away that the mute key is not the one shown. A later
+    // refusal calls showHotkeyError() from applyHotkey().
+    hotkeyError.setVisible (HotkeyStatus::invalidNoticeVisible (
+        settings.muteHotkey.isNotEmpty(), main.isMuteHotkeyRegistered()));
 
     setSize (preferredWidth, preferredHeight);
 }

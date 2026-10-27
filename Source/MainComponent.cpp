@@ -213,11 +213,18 @@ bool MainComponent::applyMuteHotkey (const juce::String& text)
     if (! hotkey.setHotkey (text))
         return false;
 
+    hotkeyRegistered = true;
+
     // Store the canonical spelling, not what the user typed: the options field
     // can then show exactly the keys Windows holds.
     settings.muteHotkey = GlobalHotkey::format (*combo);
     settingsChanged();
     return true;
+}
+
+bool MainComponent::isMuteHotkeyRegistered() const noexcept
+{
+    return hotkeyRegistered;
 }
 
 void MainComponent::reconcileStartWithWindows()
@@ -256,7 +263,11 @@ void MainComponent::applySavedHotkey()
         return;
     }
 
-    if (hotkey.setHotkey (settings.muteHotkey))
+    // The field keeps the saved text either way, so this flag is what the
+    // options callout uses to avoid presenting a refused shortcut as active.
+    hotkeyRegistered = hotkey.setHotkey (settings.muteHotkey);
+
+    if (hotkeyRegistered)
     {
         StartupLog::mark ("hotkey: registered " + hotkey.getHotkey());
         return;
