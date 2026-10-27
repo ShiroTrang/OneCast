@@ -38,7 +38,7 @@ compressor, gate, de-esser được chỉnh theo giọng nói.
 4. **Không vỡ tiếng**: không mẫu nào ra khỏi app vượt -1 dBFS.
 5. **Độ trễ thấp nhất có thể**. App hiển thị tổng độ trễ mà nó biết được.
 6. **Khử ồn hai chế độ**: AI (RNNoise, khoảng 30 ms) và Nhẹ (lọc phổ, ≤ 6 ms).
-   **Mặc định: AI** (người dùng đã chọn).
+   **Mặc định: Nhẹ** (người dùng đổi lại sau khi đo được AI trễ 30 ms). AI vẫn chọn được.
 7. Lưu và khôi phục toàn bộ thiết lập. Có preset sẵn và preset người dùng tự lưu.
 8. Tự phục hồi khi rút/cắm mic hoặc interface, và khi CABLE Input mất hoặc trở lại.
 9. Tiện ích: phím tắt Mute toàn cục, nút Bypass để so sánh A/B, đồng hồ đo kèm đèn
@@ -116,7 +116,7 @@ Pre-gain           mặc định +6 dB, dải -12..+24 dB
    ▼
 Lọc cắt trầm (HPF) mặc định 80 Hz, dải 40-200 Hz, dốc 12-18 dB/oct
    ▼
-Khử ồn             Tắt | Nhẹ (≤ 6 ms) | AI RNNoise (~30 ms)   [mặc định AI, mức 100%]
+Khử ồn             Tắt | Nhẹ (≤ 6 ms) | AI RNNoise (~30 ms)   [mặc định Nhẹ, mức 100%]
    ▼
 Noise gate mềm     downward expander, có hysteresis + hold, 0 ms
    ▼
@@ -230,7 +230,7 @@ orchestrator; Segoe UI hiển thị đủ dấu tiếng Việt).
 - Thiết lập lưu tự động vào `%APPDATA%\OneCast\settings.json` (thiết bị, mọi tham
   số, tuỳ chọn, phím tắt).
 - Preset có sẵn (chỉ đọc), builder tự tinh chỉnh con số:
-  - **Tự nhiên** (mặc định): AI 100%, compressor nhẹ (~3:1), EQ nhẹ.
+  - **Tự nhiên** (mặc định): Nhẹ 100%, compressor nhẹ (~3:1), EQ nhẹ.
   - **Phòng ồn**: AI 100%, gate ngưỡng cao hơn.
   - **Phát thanh**: compressor mạnh hơn, nâng rõ nhiều hơn, de-esser mạnh hơn.
 - Preset người dùng lưu thành JSON trong `%APPDATA%\OneCast\Presets\`.
