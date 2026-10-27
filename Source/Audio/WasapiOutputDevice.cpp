@@ -14,6 +14,7 @@ WasapiOutputDevice::WasapiOutputDevice()
 {
     stopEvent   = CreateEvent (nullptr, TRUE, FALSE, nullptr);   // manual-reset
     renderEvent = CreateEvent (nullptr, FALSE, FALSE, nullptr);  // auto-reset
+    startEvent  = CreateEvent (nullptr, TRUE, FALSE, nullptr);   // manual-reset
 }
 
 WasapiOutputDevice::~WasapiOutputDevice()
@@ -24,12 +25,25 @@ WasapiOutputDevice::~WasapiOutputDevice()
         CloseHandle (stopEvent);
     if (renderEvent != nullptr)
         CloseHandle (renderEvent);
+    if (startEvent != nullptr)
+        CloseHandle (startEvent);
 }
 
 //==============================================================================
 bool WasapiOutputDevice::start (const juce::String& deviceId, RingBuffer& inputBuffer,
                                 int producerRate)
 {
+    // Before anything else, and certainly before COM touches an endpoint: an
+    // empty id used to mean "the Windows default", which would send the
+    // processed microphone to the user's headphones. OneCast only ever renders
+    // to the chosen virtual cable.
+    if (deviceId.isEmpty())
+    {
+        errorMessage = "no output device chosen";
+        error.store (true, std::memory_order_relaxed);
+        return false;
+    }
+
     if (running.load (std::memory_order_acquire))
         return false;
 
@@ -39,7 +53,11 @@ bool WasapiOutputDevice::start (const juce::String& deviceId, RingBuffer& inputB
 
     error.store (false, std::memory_order_relaxed);
     errorMessage.clear();
+    backlogTargetFrames.store (0, std::memory_order_relaxed);
+    devicePeriodMs.store (0.0, std::memory_order_relaxed);
+    underrunCount.store (0, std::memory_order_relaxed);
     ResetEvent (stopEvent);
+    ResetEvent (startEvent);
 
     if (producerRate > 0)
         producerSampleRate.store (producerRate, std::memory_order_relaxed);
@@ -50,6 +68,20 @@ bool WasapiOutputDevice::start (const juce::String& deviceId, RingBuffer& inputB
     {
         renderThread (deviceId, &inputBuffer, producerRate);
     });
+
+    // Wait until the render thread has opened the endpoint or given up. A
+    // vanished endpoint id must fail here, where the caller can report it,
+    // rather than in a background thread the message thread never hears from.
+    WaitForSingleObject (startEvent, 5000);
+
+    if (error.load (std::memory_order_acquire))
+    {
+        if (thread.joinable())
+            thread.join();
+
+        running.store (false, std::memory_order_release);
+        return false;
+    }
 
     return true;
 }
@@ -62,6 +94,10 @@ void WasapiOutputDevice::stop()
         thread.join();
 
     running.store (false, std::memory_order_release);
+
+    // No stream, no output latency to report.
+    backlogTargetFrames.store (0, std::memory_order_relaxed);
+    devicePeriodMs.store (0.0, std::memory_order_relaxed);
 }
 
 void WasapiOutputDevice::setProducerFormat (double rate, int blockSize)
@@ -93,6 +129,21 @@ int WasapiOutputDevice::getSampleRate() const
 int WasapiOutputDevice::getNumChannels() const
 {
     return numChannels.load (std::memory_order_relaxed);
+}
+
+int WasapiOutputDevice::getBacklogTargetFrames() const noexcept
+{
+    return backlogTargetFrames.load (std::memory_order_relaxed);
+}
+
+double WasapiOutputDevice::getDevicePeriodMs() const noexcept
+{
+    return devicePeriodMs.load (std::memory_order_relaxed);
+}
+
+int WasapiOutputDevice::getUnderrunCount() const noexcept
+{
+    return underrunCount.load (std::memory_order_relaxed);
 }
 
 //==============================================================================
@@ -177,6 +228,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         errorMessage = "Failed to initialize COM: 0x" + juce::String::toHexString ((int) hr);
         error.store (true);
         running.store (false);
+        SetEvent (startEvent);
         return;
     }
 
@@ -200,6 +252,10 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         SAFE_RELEASE (device);
         SAFE_RELEASE (enumerator);
         CoUninitialize();
+
+        // Every failure path ends here, so start() waiting on this event sees
+        // it and can return the real result (errorMessage is already set).
+        SetEvent (startEvent);
     };
 
     // ---- Get device enumerator ----
@@ -410,6 +466,11 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     int largestRequest = periodFrames;
     int eventsSeen = 0;
 
+    // The engine's latency budget needs to know how long WASAPI holds a
+    // period of audio, even before the first render event arrives.
+    devicePeriodMs.store (1000.0 * periodFrames / deviceSampleRate,
+                          std::memory_order_relaxed);
+
     DriftCompensatedReader reader;
     reader.prepare (buffer->getNumChannels(), static_cast<int> (bufferSize),
                     static_cast<double> (deviceSampleRate), periodFrames);
@@ -424,6 +485,9 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         cleanup();
         return;
     }
+
+    // The endpoint is open and running: start() can return true now.
+    SetEvent (startEvent);
 
     // ---- Elevate thread priority via MMCSS ----
     DWORD mmcssTaskIndex = 0;
@@ -492,11 +556,13 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                                                        * nominalRatio)
                                    + producerBlockSize.load (std::memory_order_relaxed);
             reader.setTargetFill (targetFrames);
+            backlogTargetFrames.store (targetFrames, std::memory_order_relaxed);
 
             // Always fills all framesToRead frames: audio, or silence while
             // the ring is priming after start-up or an underrun.
             reader.read (*buffer, tempChannelPtrs.data(), deviceChannels,
                          framesToRead, nominalRatio);
+            underrunCount.store (reader.getUnderrunCount(), std::memory_order_relaxed);
 
             // Interleave the per-channel data into the output buffer.
             for (int i = 0; i < framesToRead; ++i)
