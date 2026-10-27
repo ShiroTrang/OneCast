@@ -79,7 +79,7 @@ namespace
             case NoiseMode::ai:     return "ai";
         }
 
-        return "ai";
+        return "light";  // out of range: the name of the default
     }
 
     NoiseMode readNoiseMode (const juce::var& object, const char* key, NoiseMode fallback)
