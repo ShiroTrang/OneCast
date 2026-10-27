@@ -8,6 +8,7 @@
 namespace
 {
     constexpr double settingsSaveDelayMs     = 1000.0;
+    constexpr double settingsRetryDelayMs    = 5000.0;
     constexpr double clipBannerDurationMs    = 5000.0;
     constexpr double deviceListRefreshDelayMs = 1000.0;
 
@@ -120,8 +121,11 @@ MainComponent::~MainComponent()
 
     // The engine is still running here: its chosen state is what the next
     // launch restores, and the output id is already in the settings.
-    saveSettings();
-    StartupLog::mark ("shutdown: settings saved");
+    if (saveSettings())
+        StartupLog::mark ("shutdown: settings saved");
+    else
+        StartupLog::mark ("shutdown: settings save failed");
+
     StartupLog::flush();
 
     engine.shutdown();
@@ -256,7 +260,18 @@ void MainComponent::watchAudioDevice()
 //==============================================================================
 void MainComponent::audioApiChanged (const juce::String& typeName)
 {
-    if (! engine.setApi (typeName))
+    bool applied = false;
+    {
+        // Opening an ASIO input can run the message loop: keep the 30 Hz watch
+        // from treating the transiently closed device as lost (or saving it)
+        // while the user's choice is being applied.
+        const juce::ScopedValueSetter<bool> busy (deviceBusy, true);
+        devicePanel.setEnabled (false);
+        applied = engine.setApi (typeName);
+        devicePanel.setEnabled (true);
+    }
+
+    if (! applied)
     {
         showBanner (BannerKind::openFailed,
                     Strings::bannerOpenFailed()
@@ -269,6 +284,11 @@ void MainComponent::audioApiChanged (const juce::String& typeName)
 
     deviceRecovery.watchNewDevice();
     lostDeviceState.reset();
+
+    // The new API reopens the device with a default channel; reapply the
+    // user's choice so the engine and the panel cannot disagree.
+    engine.setInputChannel (settings.inputChannel);
+
     refreshDeviceLists();
     syncDevicePanelFromEngine();
     dismissBanner (BannerKind::inputLost);
@@ -283,7 +303,18 @@ void MainComponent::audioApiChanged (const juce::String& typeName)
 
 void MainComponent::inputDeviceChanged (const juce::String& name)
 {
-    if (! engine.setInputDevice (name))
+    bool applied = false;
+    {
+        // A driver can run the message loop while it opens. The busy flag and
+        // the disabled panel mirror the reopen path so the timer and a second
+        // edit cannot touch the device mid-open.
+        const juce::ScopedValueSetter<bool> busy (deviceBusy, true);
+        devicePanel.setEnabled (false);
+        applied = engine.setInputDevice (name);
+        devicePanel.setEnabled (true);
+    }
+
+    if (! applied)
     {
         showBanner (BannerKind::openFailed,
                     Strings::bannerOpenFailed()
@@ -296,6 +327,11 @@ void MainComponent::inputDeviceChanged (const juce::String& name)
 
     deviceRecovery.watchNewDevice();
     lostDeviceState.reset();
+
+    // A mono device falls back to channel 1, so a later stereo device would
+    // otherwise open on channel 1 even though the settings say channel 2.
+    engine.setInputChannel (settings.inputChannel);
+
     refreshDeviceLists();
     syncDevicePanelFromEngine();
     dismissBanner (BannerKind::inputLost);
@@ -319,7 +355,17 @@ void MainComponent::inputChannelChanged (InputChannel channel)
 
 void MainComponent::bufferSizeChanged (int samples)
 {
-    if (! engine.setBufferSize (samples))
+    bool applied = false;
+    {
+        // Changing the buffer restarts the stream and may run the message loop;
+        // hold the timer off so it cannot take a half-applied device for lost.
+        const juce::ScopedValueSetter<bool> busy (deviceBusy, true);
+        devicePanel.setEnabled (false);
+        applied = engine.setBufferSize (samples);
+        devicePanel.setEnabled (true);
+    }
+
+    if (! applied)
     {
         showBanner (BannerKind::openFailed,
                     Strings::bannerOpenFailed()
@@ -329,6 +375,9 @@ void MainComponent::bufferSizeChanged (int samples)
         syncDevicePanelFromEngine();
         return;
     }
+
+    // The restart resets the channel selection just like an API change.
+    engine.setInputChannel (settings.inputChannel);
 
     // The buffer size lives in the device state XML, so a dirty marker is all
     // that is needed to remember it.
@@ -801,14 +850,25 @@ void MainComponent::scheduleDeviceListRefresh()
 //==============================================================================
 //  Settings and banners
 //==============================================================================
-void MainComponent::saveSettings()
+bool MainComponent::saveSettings()
 {
     if (auto state = engine.getChosenDeviceState())
         settings.deviceStateXml = state->toString();
 
-    SettingsIO::save (settings, SettingsIO::getDefaultFile());
-    settingsDirty = false;
-    settingsSaveDueMs = 0.0;
+    if (SettingsIO::save (settings, SettingsIO::getDefaultFile()))
+    {
+        settingsDirty = false;
+        settingsSaveDueMs = 0.0;
+        return true;
+    }
+
+    // A permission, disk-full or antivirus-lock failure must not lose the
+    // user's device state and params. Keep the change pending and retry on a
+    // slow clock instead of writing (and failing) at 30 Hz; the dirty flag is
+    // also what lets the shutdown path report the failure truthfully.
+    settingsSaveDueMs = juce::Time::getMillisecondCounterHiRes() + settingsRetryDelayMs;
+    logDeviceEvent ("settings save failed; retry pending");
+    return false;
 }
 
 void MainComponent::showBanner (BannerKind kind, const juce::String& message,

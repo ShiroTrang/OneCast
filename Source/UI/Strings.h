@@ -64,6 +64,7 @@ namespace Strings
     inline juce::String bannerOpenFailed() { return juce::String (juce::CharPointer_UTF8 ("Không mở được \"%1\": %2. Có thể app khác (ví dụ LiveVocal) đang dùng driver này.")); }
     inline juce::String bannerOutputLost() { return juce::String (juce::CharPointer_UTF8 ("Mất kết nối với đầu ra \"%1\". Đang chờ thiết bị quay lại.")); }
     inline juce::String bannerInputClip()  { return juce::String (juce::CharPointer_UTF8 ("Mic vào quá to (bị vỡ ngay ở phần cứng). Vặn nhỏ gain trên M-Track.")); }
+    inline juce::String dismiss()          { return juce::String (juce::CharPointer_UTF8 ("Đóng")); }
     inline juce::String trayShow()         { return juce::String (juce::CharPointer_UTF8 ("Hiện OneCast")); }
     inline juce::String trayMute()         { return juce::String (juce::CharPointer_UTF8 ("Tắt tiếng")); }
     inline juce::String trayUnmute()       { return juce::String (juce::CharPointer_UTF8 ("Bật tiếng")); }

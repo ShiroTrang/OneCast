@@ -88,7 +88,7 @@ private:
     void scheduleDeviceListRefresh();
 
     // Settings and banners
-    void saveSettings();
+    bool saveSettings();
     void showBanner (BannerKind kind, const juce::String& message,
                      AlertBanner::Severity severity);
     void dismissBanner (BannerKind kind);
