@@ -29,7 +29,7 @@ juce::var   paramsToVar   (const VoiceParams&);
 
 /// The inverse, forgiving: a missing key or one of the wrong JSON type takes the
 /// VoiceParams default, then everything is run through clampToRanges. Enums are
-/// read by name ("off", "light", "ai"); an unknown name is the default. Bypass
+/// read by name ("off", "light", "ai"); an unknown name is the default, light. Bypass
 /// and mute are always false, even if a hand-edited file says otherwise.
 VoiceParams paramsFromVar (const juce::var&);
 

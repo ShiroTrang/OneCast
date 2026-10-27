@@ -5,7 +5,8 @@
 #include <cmath>
 
 /// How the noise stage works. Stored as an int in AtomicVoiceParams, so the
-/// values are part of the contract: do not renumber them.
+/// values are part of the contract: do not renumber them. The default is light:
+/// it adds about 5 ms, while ai (RNNoise) adds about 30 ms and stays opt-in.
 enum class NoiseMode    : int { off = 0, light = 1, ai = 2 };
 
 /// Which microphone channel(s) feed the voice chain.
@@ -37,7 +38,7 @@ struct VoiceParams
 {
     float preGainDb = 6.0f;
     bool  hpfOn = true;          float hpfHz = 80.0f;
-    NoiseMode noiseMode = NoiseMode::ai;  float noiseAmount = 100.0f;
+    NoiseMode noiseMode = NoiseMode::light;  float noiseAmount = 100.0f;
     bool  gateOn = true;         float gateThresholdDb = -50.0f;
     bool  eqOn = true;           float eqMudDb = -2.0f, eqClarityDb = 2.0f, eqAirDb = 1.0f;
     bool  compOn = true;         float compThresholdDb = -20.0f, compRatio = 3.0f, compMakeupDb = 3.0f;
@@ -90,7 +91,8 @@ inline VoiceParams clampToRanges (VoiceParams p) noexcept
             break;
 
         default:
-            p.noiseMode = NoiseMode::ai;
+            // The default, not a fixed mode: it moves with VoiceParams, like the floats above.
+            p.noiseMode = VoiceParams {}.noiseMode;
             break;
     }
 

@@ -664,7 +664,7 @@ public:
             }
 
             expect (clampToRanges (defaults) == defaults, "defaults must already be in range");
-            expect (defaults.noiseMode == NoiseMode::ai);
+            expect (defaults.noiseMode == NoiseMode::light, "the default noise mode is Light (AI is 30 ms, Light about 5 ms)");
             expect (! defaults.bypass && ! defaults.mute);
         }
 
@@ -715,17 +715,18 @@ public:
             }
         }
 
-        beginTest ("a NoiseMode outside its range becomes ai");
+        beginTest ("a NoiseMode outside its range becomes the default, light");
         {
             VoiceParams p;
 
             p.noiseMode = (NoiseMode) 7;
-            expect (clampToRanges (p).noiseMode == NoiseMode::ai);
+            expect (clampToRanges (p).noiseMode == NoiseMode::light);
 
             p.noiseMode = (NoiseMode) -1;
-            expect (clampToRanges (p).noiseMode == NoiseMode::ai);
+            expect (clampToRanges (p).noiseMode == NoiseMode::light);
 
-            // The three real modes are kept, not swept into the default.
+            // The three real modes are kept, not swept into the default; an
+            // explicit ai in particular must not be mistaken for an invalid value.
             p.noiseMode = NoiseMode::off;
             expect (clampToRanges (p).noiseMode == NoiseMode::off);
             p.noiseMode = NoiseMode::light;
@@ -764,7 +765,7 @@ public:
             VoiceParams p;
             p.preGainDb = 13.37f;
             p.hpfOn = false;           p.hpfHz = 123.5f;
-            p.noiseMode = NoiseMode::light;  p.noiseAmount = 42.25f;
+            p.noiseMode = NoiseMode::ai;  p.noiseAmount = 42.25f;
             p.gateOn = false;          p.gateThresholdDb = -61.75f;
             p.eqOn = false;            p.eqMudDb = -7.125f;  p.eqClarityDb = 5.5f;  p.eqAirDb = 3.25f;
             p.compOn = false;          p.compThresholdDb = -27.5f;  p.compRatio = 6.75f;  p.compMakeupDb = 9.125f;

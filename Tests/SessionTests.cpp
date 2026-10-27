@@ -72,7 +72,7 @@ namespace
         VoiceParams p;
         p.preGainDb = 13.37f;
         p.hpfOn = false;           p.hpfHz = 123.5f;
-        p.noiseMode = NoiseMode::light;  p.noiseAmount = 42.25f;
+        p.noiseMode = NoiseMode::ai;  p.noiseAmount = 42.25f;
         p.gateOn = false;          p.gateThresholdDb = -61.75f;
         p.eqOn = false;            p.eqMudDb = -7.125f;  p.eqClarityDb = 5.5f;  p.eqAirDb = 3.25f;
         p.compOn = false;          p.compThresholdDb = -27.5f;  p.compRatio = 6.75f;  p.compMakeupDb = 9.125f;
@@ -178,7 +178,7 @@ public:
             const auto text = JsonFile::toText (paramsToVar (unusualParams()));
 
             expect (text.contains ("13.37") && ! text.contains ("13.3699"), text);
-            expect (text.contains ("\"light\""), "noise mode is written by name");
+            expect (text.contains ("\"ai\""), "noise mode is written by name");
             expect (! text.containsIgnoreCase ("bypass") && ! text.containsIgnoreCase ("mute"), text);
         }
 
@@ -192,7 +192,25 @@ public:
             const auto back = paramsFromVar (juce::JSON::parse (JsonFile::toText (paramsToVar (bad))));
             expectEquals (back.preGainDb, ParamRanges::preGainDb.defaultValue);
             expectEquals (back.hpfHz, ParamRanges::hpfHz.max);
-            expect (back.noiseMode == NoiseMode::ai);
+            expect (back.noiseMode == NoiseMode::light, "an invalid mode comes back as the default");
+        }
+
+        beginTest ("the three mode names are read as themselves, ai included");
+        {
+            // The default is light, so an explicit "ai" must not fall into the
+            // same branch as an unknown name.
+            expect (paramsFromVar (juce::JSON::parse (R"({"noiseMode": "off"})")).noiseMode == NoiseMode::off);
+            expect (paramsFromVar (juce::JSON::parse (R"({"noiseMode": "light"})")).noiseMode == NoiseMode::light);
+            expect (paramsFromVar (juce::JSON::parse (R"({"noiseMode": "ai"})")).noiseMode == NoiseMode::ai);
+            expect (paramsFromVar (juce::JSON::parse (R"({})")).noiseMode == NoiseMode::light, "missing key: default");
+
+            const auto settings = SettingsIO::fromVar (juce::JSON::parse (R"({"params": {"noiseMode": "ai"}})"));
+            expect (settings.params.noiseMode == NoiseMode::ai);
+            expect (AppSettings {}.params.noiseMode == NoiseMode::light, "a fresh settings file starts on Light");
+
+            VoiceParams ai;
+            ai.noiseMode = NoiseMode::ai;
+            expect (paramsFromVar (juce::JSON::parse (JsonFile::toText (paramsToVar (ai)))).noiseMode == NoiseMode::ai);
         }
 
         beginTest ("paramsFromVar: damaged values fall back to defaults, then clamp");
@@ -213,7 +231,7 @@ public:
             expectEquals (p.preGainDb, ParamRanges::preGainDb.max);
             expect (p.hpfOn, "a number is not a bool: default (on)");
             expectEquals (p.hpfHz, ParamRanges::hpfHz.defaultValue);
-            expect (p.noiseMode == NoiseMode::ai, "a number is not a mode name: default");
+            expect (p.noiseMode == NoiseMode::light, "a number is not a mode name: default");
             expectEquals (p.noiseAmount, ParamRanges::noiseAmount.defaultValue);
             expect (p.gateThresholdDb >= ParamRanges::gateThresholdDb.min
                     && p.gateThresholdDb <= ParamRanges::gateThresholdDb.max, "an overflowing number stays in range");
@@ -291,7 +309,7 @@ public:
             expectEquals (clamped.params.preGainDb, 24.0f);
 
             const auto badMode = SettingsIO::fromVar (juce::JSON::parse (R"({"params": {"noiseMode": "x"}})"));
-            expect (badMode.params.noiseMode == NoiseMode::ai);
+            expect (badMode.params.noiseMode == NoiseMode::light);
 
             // One bad key must not cost the good ones next to it.
             const auto partial = SettingsIO::fromVar (juce::JSON::parse (utf8 (R"({
@@ -436,6 +454,7 @@ public:
                 VoiceParams expectedNatural;
 
                 VoiceParams expectedNoisy;
+                expectedNoisy.noiseMode = NoiseMode::ai;
                 expectedNoisy.hpfHz = 100.0f;
                 expectedNoisy.gateThresholdDb = -42.0f;
 
@@ -450,6 +469,9 @@ public:
                 expectedBroadcast.deEssAmount = 65.0f;
 
                 expect (presets[0].params == expectedNatural, "natural keeps every default");
+                expect (presets[0].params.noiseMode == NoiseMode::light, "natural is Light");
+                expect (presets[1].params.noiseMode == NoiseMode::ai, "noisy room uses AI");
+                expect (presets[2].params.noiseMode == NoiseMode::light, "broadcast is Light");
                 expect (presets[1].params == expectedNoisy, "noisy room");
                 expect (presets[2].params == expectedBroadcast, "broadcast");
             }
@@ -473,7 +495,7 @@ public:
 
             VoiceParams mine;
             mine.hpfHz = 150.0f;
-            mine.noiseMode = NoiseMode::light;
+            mine.noiseMode = NoiseMode::ai;
             mine.eqClarityDb = 6.5f;
             mine.deEssOn = false;
 
@@ -657,7 +679,7 @@ public:
             const auto wildFound = library.find (utf8 ("Hoang dã"));
             expect (wildFound.has_value());
             expectEquals (wildFound->params.preGainDb, 24.0f);
-            expect (wildFound->params.noiseMode == NoiseMode::ai);
+            expect (wildFound->params.noiseMode == NoiseMode::light);
             expectEquals (wildFound->params.compRatio, 4.5f);
             expectEquals (wildFound->params.hpfHz, ParamRanges::hpfHz.defaultValue, "missing keys: defaults");
 

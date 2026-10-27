@@ -168,7 +168,9 @@ juce::File PresetLibrary::getDefaultDirectory()
 
 std::vector<Preset> PresetLibrary::builtIns()
 {
-    // Only the differences from the VoiceParams defaults are listed.
+    // Only the differences from the VoiceParams defaults are listed. The default
+    // noise mode is Light, so `natural` and `broadcast` run Light; the noisy room
+    // is the one preset worth the extra ~25 ms of AI noise suppression.
     Preset natural;
     natural.name = utf8 ("Tự nhiên");
     natural.builtIn = true;
@@ -176,6 +178,7 @@ std::vector<Preset> PresetLibrary::builtIns()
     Preset noisyRoom;
     noisyRoom.name = utf8 ("Phòng ồn");
     noisyRoom.builtIn = true;
+    noisyRoom.params.noiseMode = NoiseMode::ai;
     noisyRoom.params.hpfHz = 100.0f;
     noisyRoom.params.gateThresholdDb = -42.0f;
 
