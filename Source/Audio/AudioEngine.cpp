@@ -525,12 +525,46 @@ float AudioEngine::getTotalLatencyMs() const noexcept
     const double rate = sr > 1.0 ? sr : (double) preferredSampleRate;
 
     // The backlog is in producer frames, which are engine frames.
-    const double inputMs   = 1000.0 * inputLatencySamples_.load (std::memory_order_relaxed) / rate;
-    const double chainMs   = 1000.0 * chain_.getLatencySamples() / rate;
-    const double backlogMs = 1000.0 * output_.getBacklogTargetFrames() / rate;
-    const double periodMs  = output_.getDevicePeriodMs();
+    const double inputMs = 1000.0 * inputLatencySamples_.load (std::memory_order_relaxed) / rate;
+    const double chainMs = 1000.0 * chain_.getLatencySamples() / rate;
 
-    return (float) (inputMs + chainMs + backlogMs + periodMs);
+    // While the cable stream runs, report what is actually queued (measured
+    // ring fill plus endpoint padding). The old backlog-target estimate is
+    // only the fallback when there is no stream to measure.
+    const double outputMs = output_.isRunning()
+                              ? output_.getMeasuredLatencyMs()
+                              : 1000.0 * output_.getBacklogTargetFrames() / rate
+                                  + output_.getDevicePeriodMs();
+
+    return (float) (inputMs + chainMs + outputMs);
+}
+
+juce::String AudioEngine::describeLatency() const
+{
+    // Message thread only: builds a string and reads atomics.
+    const double sr = sampleRate_.load (std::memory_order_relaxed);
+    const double rate = sr > 1.0 ? sr : (double) preferredSampleRate;
+
+    const double inputMs = 1000.0 * inputLatencySamples_.load (std::memory_order_relaxed) / rate;
+    const double chainMs = 1000.0 * chain_.getLatencySamples() / rate;
+    const double outputMs = output_.isRunning()
+                              ? output_.getMeasuredLatencyMs()
+                              : 1000.0 * output_.getBacklogTargetFrames() / rate
+                                  + output_.getDevicePeriodMs();
+
+    const auto mode = output_.getOutputMode();
+    const char* modeName = mode == WasapiOutputDevice::OutputMode::exclusive
+                             ? "exclusive"
+                             : mode == WasapiOutputDevice::OutputMode::sharedLowLatency
+                                 ? "sharedLowLatency"
+                                 : "shared";
+
+    return "total=" + juce::String (inputMs + chainMs + outputMs, 1)
+         + " ms in=" + juce::String (inputMs, 1)
+         + " chain=" + juce::String (chainMs, 1)
+         + " out=" + juce::String (outputMs, 1)
+         + " mode=" + modeName
+         + " period=" + juce::String (output_.getDevicePeriodMs(), 1) + " ms";
 }
 
 int AudioEngine::getOutputUnderrunCount() const noexcept

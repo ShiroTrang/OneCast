@@ -116,6 +116,8 @@ private:
                     file.getParentDirectory().createDirectory();
                     file.deleteFile();
 
+                    StartupLog::mark ("latency: " + static_cast<MainComponent*> (content)->getEngine().describeLatency());
+
                     const auto image = content->createComponentSnapshot (content->getLocalBounds());
 
                     if (auto stream = std::unique_ptr<juce::FileOutputStream> (file.createOutputStream()))

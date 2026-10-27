@@ -121,8 +121,15 @@ public:
     /// True once per raw input sample at or above -0.1 dBFS, then clears.
     bool takeInputClipFlag() noexcept;
 
-    /// Driver input latency + chain latency + output backlog + device period.
+    /// Driver input latency + chain latency + the output latency actually
+    /// queued. While no output runs it falls back to the backlog target plus
+    /// the device period, which is the best estimate available then.
     float getTotalLatencyMs() const noexcept;
+
+    /// Message-thread summary for the start-up log, e.g.
+    /// total=21.4 ms in=12.0 chain=6.3 out=3.1 mode=exclusive period=3.0 ms.
+    juce::String describeLatency() const;
+
     int getOutputUnderrunCount() const noexcept;
 
     /// What the render thread drains; tests read it directly.

@@ -13,6 +13,15 @@ class RingBuffer;
 class WasapiOutputDevice
 {
 public:
+    /// How the stream was opened. The ladder is tried once per start(), in
+    /// this order, and the first rung the endpoint accepts wins.
+    enum class OutputMode
+    {
+        exclusive,        ///< exclusive mode, event-driven, minimum device period
+        sharedLowLatency, ///< IAudioClient3 shared stream at the minimum engine period
+        shared            ///< shared mode at the default period (legacy behaviour)
+    };
+
     WasapiOutputDevice();
     ~WasapiOutputDevice();
 
@@ -48,9 +57,19 @@ public:
         Written by the render thread; safe to read from any thread. */
     int getBacklogTargetFrames() const noexcept;
 
-    /** WASAPI's device period for the open stream, in milliseconds. Written by
-        the render thread; safe to read from any thread. */
+    /** WASAPI's device period for the open stream, in milliseconds: the period
+        actually in use, not the default. Written by the render thread; safe to
+        read from any thread. */
     double getDevicePeriodMs() const noexcept;
+
+    /** The rung of the mode ladder that opened the stream. */
+    OutputMode getOutputMode() const noexcept;
+
+    /** Output latency of the open stream, in milliseconds: the smoothed ring
+        fill at the producer rate plus the smoothed endpoint padding at the
+        device rate (or the stream latency when padding is unavailable). This
+        is what is actually queued, not a backlog target. Safe from any thread. */
+    double getMeasuredLatencyMs() const noexcept;
 
     /** Underruns seen by the drift-compensated reader since the stream opened. */
     int getUnderrunCount() const noexcept;
@@ -106,7 +125,17 @@ private:
     std::atomic<int>    producerBlockSize { 0 };
     std::atomic<int>    backlogTargetFrames { 0 };
     std::atomic<double> devicePeriodMs { 0.0 };
+    std::atomic<int>    outputMode { (int) OutputMode::shared };
     std::atomic<int>    underrunCount { 0 };
+
+    // Honest output latency, published by the render thread. The ring fill is
+    // in producer frames and the endpoint padding in device frames, both
+    // one-pole smoothed over about 0.5 s so a single event does not make the
+    // UI jump. streamLatencyMs is the fallback when GetCurrentPadding fails.
+    std::atomic<double> measuredRingFillFrames { 0.0 };
+    std::atomic<double> measuredPaddingFrames  { 0.0 };
+    std::atomic<double> streamLatencyMs        { 0.0 };
+    std::atomic<bool>   paddingValid           { false };
 
     // Published by the render thread with release ordering; errorDetail is the
     // HRESULT or GetLastError value associated with the code. The reader loads
