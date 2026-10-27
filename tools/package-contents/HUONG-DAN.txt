@@ -205,34 +205,36 @@ Nhớ: đừng thêm bộ lọc "Noise Suppression" của OBS lên nguồn này
 ----------------------------------------------------------------
 Thẻ "Khử ồn" có ba chế độ:
 
-   AI     Khử ồn bằng mạng nơ-ron (RNNoise). Sạch nhất: bỏ được
-          tiếng quạt, bàn phím, điều hoà, tiếng ồn nền...
-          Độ trễ khoảng 30 ms. Đây là chế độ MẶC ĐỊNH.
+   Nhẹ    Lọc phổ nhẹ, nhanh. Độ trễ khoảng 5 ms. Đây là chế độ
+          MẶC ĐỊNH: giọng tự nhiên, phản hồi nhanh, hợp khi phòng
+          đã khá yên và bạn muốn độ trễ thấp nhất.
 
-   Nhẹ    Lọc phổ nhẹ, nhanh. Độ trễ khoảng 5 ms. Khử ồn yếu hơn
-          AI nhưng tự nhiên và phản hồi nhanh hơn - hợp khi môi
-          trường đã khá yên và bạn muốn độ trễ thấp nhất.
+   AI     Khử ồn bằng mạng nơ-ron (RNNoise). Mạnh hơn "Nhẹ": bỏ
+          được tiếng quạt, bàn phím, điều hoà, tiếng ồn nền...
+          Đổi lại độ trễ cao hơn, khoảng 30 ms. Chọn AI khi phòng
+          ồn (hoặc chọn preset "Phòng ồn", preset này dùng AI).
 
    Tắt    Không khử ồn. Không thêm độ trễ nào.
 
 Thanh "Mức" (0 - 100 %) trộn giữa giọng gốc và giọng đã khử ồn.
 100 % là khử hết cỡ. Nếu thấy giọng bị méo kiểu "robot" hay nuốt
-chữ, hạ "Mức" xuống 70 - 80 % hoặc đổi sang "Nhẹ".
+chữ (hay gặp ở chế độ AI), hạ "Mức" xuống 70 - 80 % hoặc đổi
+sang "Nhẹ".
 
 Độ trễ tổng (số hiện ở "Độ trễ ≈ ... ms" trên thanh trên cùng) gồm:
    - buffer của ASIO / Windows Audio (128 mẫu ở 48 kHz ≈ 2,7 ms,
      cộng độ trễ do driver báo)
-   - khâu khử ồn (AI ≈ 30 ms, Nhẹ ≈ 5 ms, Tắt = 0)
+   - khâu khử ồn (Nhẹ ≈ 5 ms, AI ≈ 30 ms, Tắt = 0)
    - limiter (1 ms)
    - đường ra CABLE Input (khoảng 1 chu kỳ thiết bị, thường 10 ms,
      cộng vài ms)
-Ước tính thô với M-Track, buffer 128, chế độ AI: khoảng 45 - 55
-ms. Chuyển sang "Nhẹ" bớt đi khoảng 25 ms. Độ trễ nằm bên trong
-VB-Cable và độ trễ mạng của Discord thì OneCast không đo được.
-Số thật của máy bạn hiện ở dòng "Độ trễ ≈ ... ms". Khi nói chuyện
-trong Discord, 30 ms của khâu AI thường khó nhận ra; nếu bạn vẫn
-thấy lệch (ví dụ khi chơi game cần phản xạ nhanh), chuyển sang
-"Nhẹ".
+Ước tính thô với M-Track, buffer 128: chế độ "Nhẹ" khoảng 20 - 30
+ms; chuyển sang "AI" cộng thêm khoảng 25 ms (tổng khoảng 45 - 55
+ms). Độ trễ nằm bên trong VB-Cable và độ trễ mạng của Discord thì
+OneCast không đo được. Số thật của máy bạn hiện ở dòng
+"Độ trễ ≈ ... ms". Khi nói chuyện trong Discord, 30 ms của khâu AI
+thường khó nhận ra; nhưng nếu bạn chơi game cần phản xạ nhanh hoặc
+thấy lệch tiếng, hãy ở lại "Nhẹ".
 
 Đổi chế độ khử ồn khi đang chạy được, app chuyển mượt nên không
 có tiếng "bụp".
@@ -259,9 +261,11 @@ một núm để đưa nó về giá trị mặc định.
                 Limiter luôn bật, không tắt được: trần -1 dBFS.
 
 PRESET (thanh dưới cùng, mục "Preset")
-   Tự nhiên    Mặc định. AI 100 %, nén nhẹ, EQ nhẹ.
-   Phòng ồn    Như trên nhưng gate ngưỡng cao hơn, hợp phòng
-               nhiều tiếng ồn nền.
+   Tự nhiên    Mặc định. Nén nhẹ, EQ nhẹ, giọng gần như gốc.
+   Phòng ồn    Dùng chế độ khử ồn AI và gate ngưỡng cao hơn, hợp
+               phòng nhiều tiếng ồn nền (quạt, bàn phím, đường
+               phố...). Chọn preset này thì độ trễ tăng khoảng
+               25 ms so với "Nhẹ".
    Phát thanh  Nén mạnh hơn, giọng rõ hơn, De-esser mạnh hơn:
                giọng "đài phát thanh".
    Chọn preset xong vẫn chỉnh tay được. Chỉnh xong muốn giữ thì
@@ -419,8 +423,14 @@ Settings > Apps, hoặc dùng trình cài của VB-Cable (nút
 [Giọng bị "robot", nuốt chữ, mất đầu / cuối câu]
    -> Có thể Discord đang bật Noise Suppression (Krisp) chồng lên
       OneCast. Tắt nó đi (mục 5).
-   -> Hạ "Mức" của Khử ồn xuống 70 - 80 %, hoặc đổi sang "Nhẹ".
+   -> Hạ "Mức" của Khử ồn xuống 70 - 80 %, hoặc đổi sang "Nhẹ"
+      nếu đang dùng "AI".
    -> Hạ "Ngưỡng" của Gate xuống một chút.
+
+[Vẫn còn tiếng ồn nền (quạt, bàn phím...) lọt vào giọng]
+   -> Đổi "Khử ồn" từ "Nhẹ" sang "AI", hoặc chọn preset
+      "Phòng ồn". Bù lại độ trễ tăng thêm khoảng 25 ms.
+   -> Nâng "Ngưỡng" của Gate lên một chút.
 
 [Giọng quá nhỏ]
    -> Tăng "Pre-gain". Mic dynamic cần nhiều gain. Nếu cần nhiều
