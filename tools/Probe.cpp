@@ -24,6 +24,7 @@
 #include <csignal>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -139,9 +140,21 @@ namespace
 
         void audioDeviceError (const juce::String& message) override
         {
-            const juce::SpinLock::ScopedLockType lock (errorLock);
-            errorMessage = message;
-            hasError = true;
+            // A WASAPI error can be delivered on the capture thread, so this
+            // must not lock or allocate: the text goes into a preallocated
+            // buffer, truncated if needed, and is published with a release
+            // store. Only the first error is kept, which also means a single
+            // writer ever touches the buffer (no race with the main thread).
+            if (errorClaimed.exchange (true, std::memory_order_acq_rel))
+                return;
+
+            const int numBytes = (int) message.getNumBytesAsUTF8();
+            const int size = juce::jmin (numBytes, (int) sizeof (errorText) - 1);
+
+            std::memcpy (errorText, message.toRawUTF8(), (size_t) size);
+            errorText[size] = '\0';
+
+            hasErrorFlag.store (true, std::memory_order_release);
         }
 
         void audioDeviceIOCallbackWithContext (const float* const* input, int numInputChannels,
@@ -211,10 +224,15 @@ namespace
             return n;
         }
 
+        /// Main thread: the message once audioDeviceError has published one.
+        /// The acquire pairs with the writer's release store, so the text is
+        /// complete before it is read here.
         juce::String getError() const
         {
-            const juce::SpinLock::ScopedLockType lock (errorLock);
-            return hasError ? errorMessage : juce::String();
+            if (! hasErrorFlag.load (std::memory_order_acquire))
+                return {};
+
+            return juce::String (errorText);
         }
 
         std::atomic<juce::int64> deliveredSamples { 0 }, overrunSamples { 0 };
@@ -222,9 +240,13 @@ namespace
     private:
         juce::AbstractFifo fifo;
         std::vector<float> storage;
-        mutable juce::SpinLock errorLock;
-        juce::String errorMessage;
-        bool hasError = false;
+
+        // 512 bytes is far more than the messages WASAPI produces; excess is
+        // truncated. errorClaimed serialises the single allowed write, and
+        // hasErrorFlag tells the main thread the text is complete.
+        char errorText[512] = {};
+        std::atomic<bool> errorClaimed { false };
+        std::atomic<bool> hasErrorFlag { false };
     };
 
     //==========================================================================

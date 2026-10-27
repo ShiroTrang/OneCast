@@ -42,10 +42,12 @@ namespace
         ProbeAnalyzer analyzer (sr, hz);
         juce::Random random (seed);
 
-        // Mixes tiny blocks (including 1 and 0 samples) with device-sized ones.
+        // Mixes tiny blocks (1 to 3 samples) with device-sized ones. Every
+        // block is at least 1 sample: nextInt (int) is [0, max), so an
+        // unguarded 0 would leave `start` unchanged and spin forever.
         for (int start = 0; start < (int) x.size();)
         {
-            const int wanted = random.nextInt (4) == 0 ? random.nextInt (3)
+            const int wanted = random.nextInt (4) == 0 ? 1 + random.nextInt (3)
                                                        : 1 + random.nextInt (2000);
             const int n = std::min (wanted, (int) x.size() - start);
             analyzer.process (x.data() + start, n);
