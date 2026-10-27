@@ -51,6 +51,18 @@ public:
     /// or "" when VB-Audio Virtual Cable is not installed.
     static juce::String findCableInputId (const std::vector<WasapiOutputDevice::DeviceInfo>& devices);
 
+    /// The DEVICESETUP used to open an explicitly chosen input. The output
+    /// layout is written as an explicitly empty audioDeviceOutChans: a missing
+    /// attribute would let JUCE fall back to the default output channels.
+    static std::unique_ptr<juce::XmlElement> makeDeviceState (const juce::String& typeName,
+                                                              const juce::String& inputName,
+                                                              int bufferSize);
+
+    /// A saved state reduced to input-only. The old combined name becomes the
+    /// input, a virtual cable output is dropped, and the output endpoint plus
+    /// its channel layout are removed.
+    static std::unique_ptr<juce::XmlElement> inputOnlyState (const juce::XmlElement& saved);
+
     // ------------------------------------------------------------------
     //  Lifecycle (message thread)
     // ------------------------------------------------------------------

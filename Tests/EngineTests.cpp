@@ -221,6 +221,66 @@ public:
             expectEquals (AudioEngine::findCableInputId ({}), juce::String());
         }
 
+        beginTest ("empty input choice is refused");
+        {
+            // A saved state whose only input is the virtual cable is sanitised
+            // to an empty input name. JUCE reads a blank name as "the default
+            // device", so it must never reach AudioDeviceManager::initialise().
+            juce::XmlElement saved ("DEVICESETUP");
+            saved.setAttribute ("deviceType", "Windows Audio");
+            saved.setAttribute ("audioDeviceName", "CABLE Output (VB-Audio Virtual Cable)");
+            saved.setAttribute ("audioDeviceRate", 48000.0);
+
+            const auto clean = AudioEngine::inputOnlyState (saved);
+            expectEquals (clean->getStringAttribute ("audioInputDeviceName"), juce::String());
+
+            AudioEngine engine;
+            engine.initialise (&saved);
+
+            expect (! engine.isDeviceOpen(), "a blank input name opened a device");
+            expect (engine.getLastDeviceError().isNotEmpty(), "the refusal was not reported");
+
+            const bool reopened = engine.reopenDevice (saved);
+            expect (! reopened, "reopenDevice accepted a blank input name");
+            expect (! engine.isDeviceOpen(), "reopenDevice opened a device");
+            expect (engine.getLastDeviceError().isNotEmpty(),
+                    "reopenDevice reported no error");
+        }
+
+        beginTest ("generated state has no output layout");
+        {
+            const auto opened = AudioEngine::makeDeviceState ("Windows Audio",
+                                                              "Microphone (USB)", 0);
+
+            // JUCE treats a missing audioDeviceOutChans as "use the default
+            // channel counts"; an empty one is an explicit zero.
+            expect (opened->hasAttribute ("audioDeviceOutChans"),
+                    "a missing audioDeviceOutChans asks JUCE for default output channels");
+            expectEquals (opened->getStringAttribute ("audioDeviceOutChans"), juce::String());
+            expectEquals (opened->getStringAttribute ("audioOutputDeviceName"), juce::String());
+            expectEquals (opened->getStringAttribute ("audioInputDeviceName"),
+                          juce::String ("Microphone (USB)"));
+
+            // A state saved by a monitor-equipped build keeps its microphone
+            // but loses the output endpoint and its channel layout.
+            juce::XmlElement saved ("DEVICESETUP");
+            saved.setAttribute ("deviceType", "Windows Audio");
+            saved.setAttribute ("audioDeviceName", "Microphone (USB)");
+            saved.setAttribute ("audioOutputDeviceName", "Speakers (Realtek)");
+            saved.setAttribute ("audioDeviceInChans", "11");
+            saved.setAttribute ("audioDeviceOutChans", "11");
+
+            const auto clean = AudioEngine::inputOnlyState (saved);
+
+            expectEquals (clean->getStringAttribute ("audioInputDeviceName"),
+                          juce::String ("Microphone (USB)"));
+            expectEquals (clean->getStringAttribute ("audioOutputDeviceName"), juce::String());
+            expect (clean->hasAttribute ("audioDeviceOutChans"));
+            expectEquals (clean->getStringAttribute ("audioDeviceOutChans"), juce::String());
+            expect (! clean->hasAttribute ("audioDeviceName"),
+                    "the combined device name was not converted to input-only");
+        }
+
         beginTest ("never renders to the default device");
         {
             RingBuffer ring (2, 65536);

@@ -65,6 +65,29 @@ public:
     static std::vector<DeviceInfo> getAvailableDevices();
 
 private:
+    /// Every failure path publishes one of these instead of a juce::String:
+    /// the render thread must not allocate, and the message is only built from
+    /// the caller's thread in getErrorMessage().
+    enum class ErrorCode
+    {
+        none = 0,
+        noDeviceChosen,
+        comInitialization,
+        deviceEnumerator,
+        renderDevice,
+        activateAudioClient,
+        mixFormat,
+        initializeAudioClient,
+        setEventHandle,
+        renderClient,
+        bufferSize,
+        startAudioClient,
+        startTimedOut,
+        deviceDisconnected,
+        waitFailed
+    };
+
+    void setError (ErrorCode code, int detail = 0) noexcept;
     void renderThread (juce::String deviceId, RingBuffer* buffer, int producerRate);
 
     std::thread thread;
@@ -77,7 +100,6 @@ private:
     HANDLE startEvent  = nullptr;
 
     std::atomic<bool> running     { false };
-    std::atomic<bool> error       { false };
     std::atomic<int>  sampleRate  { 0 };
     std::atomic<int>  numChannels { 0 };
     std::atomic<double> producerSampleRate { 0.0 };
@@ -85,7 +107,12 @@ private:
     std::atomic<int>    backlogTargetFrames { 0 };
     std::atomic<double> devicePeriodMs { 0.0 };
     std::atomic<int>    underrunCount { 0 };
-    juce::String errorMessage;
+
+    // Published by the render thread with release ordering; errorDetail is the
+    // HRESULT or GetLastError value associated with the code. The reader loads
+    // the code with acquire ordering before using the detail.
+    std::atomic<int>    errorCode { (int) ErrorCode::none };
+    std::atomic<int>    errorDetail { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WasapiOutputDevice)
 };

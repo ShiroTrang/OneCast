@@ -39,8 +39,7 @@ bool WasapiOutputDevice::start (const juce::String& deviceId, RingBuffer& inputB
     // to the chosen virtual cable.
     if (deviceId.isEmpty())
     {
-        errorMessage = "no output device chosen";
-        error.store (true, std::memory_order_relaxed);
+        setError (ErrorCode::noDeviceChosen);
         return false;
     }
 
@@ -51,8 +50,7 @@ bool WasapiOutputDevice::start (const juce::String& deviceId, RingBuffer& inputB
     if (thread.joinable())
         thread.join();
 
-    error.store (false, std::memory_order_relaxed);
-    errorMessage.clear();
+    setError (ErrorCode::none);
     backlogTargetFrames.store (0, std::memory_order_relaxed);
     devicePeriodMs.store (0.0, std::memory_order_relaxed);
     underrunCount.store (0, std::memory_order_relaxed);
@@ -72,9 +70,23 @@ bool WasapiOutputDevice::start (const juce::String& deviceId, RingBuffer& inputB
     // Wait until the render thread has opened the endpoint or given up. A
     // vanished endpoint id must fail here, where the caller can report it,
     // rather than in a background thread the message thread never hears from.
-    WaitForSingleObject (startEvent, 5000);
+    const DWORD waitResult = WaitForSingleObject (startEvent, 2000);
 
-    if (error.load (std::memory_order_acquire))
+    if (waitResult != WAIT_OBJECT_0)
+    {
+        // Nothing signalled success or failure: do not claim a stream that may
+        // not exist. Stop and join the thread, then report the timeout.
+        setError (ErrorCode::startTimedOut, (int) waitResult);
+        SetEvent (stopEvent);
+
+        if (thread.joinable())
+            thread.join();
+
+        running.store (false, std::memory_order_release);
+        return false;
+    }
+
+    if (hasError())
     {
         if (thread.joinable())
             thread.join();
@@ -113,12 +125,51 @@ bool WasapiOutputDevice::isRunning() const
 
 bool WasapiOutputDevice::hasError() const
 {
-    return error.load (std::memory_order_relaxed);
+    return errorCode.load (std::memory_order_acquire) != (int) ErrorCode::none;
+}
+
+void WasapiOutputDevice::setError (ErrorCode code, int detail) noexcept
+{
+    // Detail first, then the code with release ordering: a reader that sees
+    // the code with acquire ordering also sees the matching detail.
+    errorDetail.store (detail, std::memory_order_relaxed);
+    errorCode.store ((int) code, std::memory_order_release);
 }
 
 juce::String WasapiOutputDevice::getErrorMessage() const
 {
-    return errorMessage;
+    // Built here, on the caller's thread, from an atomic code: the render
+    // thread never allocates and no juce::String is shared between threads.
+    const auto code = (ErrorCode) errorCode.load (std::memory_order_acquire);
+    const int detail = errorDetail.load (std::memory_order_relaxed);
+
+    const auto hresult = [detail] (const char* prefix)
+    {
+        return juce::String (prefix) + "0x" + juce::String::toHexString (detail);
+    };
+
+    switch (code)
+    {
+        case ErrorCode::none:                   return {};
+        case ErrorCode::noDeviceChosen:         return "no output device chosen";
+        case ErrorCode::comInitialization:      return hresult ("Failed to initialize COM: ");
+        case ErrorCode::deviceEnumerator:       return hresult ("Failed to create device enumerator: ");
+        case ErrorCode::renderDevice:           return hresult ("Failed to get render device: ");
+        case ErrorCode::activateAudioClient:    return hresult ("Failed to activate audio client: ");
+        case ErrorCode::mixFormat:              return hresult ("Failed to get mix format: ");
+        case ErrorCode::initializeAudioClient:  return hresult ("Failed to initialize audio client: ");
+        case ErrorCode::setEventHandle:         return hresult ("Failed to set event handle: ");
+        case ErrorCode::renderClient:           return hresult ("Failed to get render client: ");
+        case ErrorCode::bufferSize:             return hresult ("Failed to get buffer size: ");
+        case ErrorCode::startAudioClient:       return hresult ("Failed to start audio client: ");
+        case ErrorCode::deviceDisconnected:     return "Audio device was disconnected";
+        case ErrorCode::startTimedOut:          return "the render thread did not start ("
+                                                       + juce::String (detail) + ")";
+        case ErrorCode::waitFailed:             return "WaitForMultipleObjects failed: "
+                                                       + juce::String (detail);
+    }
+
+    return {};
 }
 
 int WasapiOutputDevice::getSampleRate() const
@@ -225,9 +276,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     HRESULT hr = CoInitializeEx (nullptr, COINIT_MULTITHREADED);
     if (FAILED (hr))
     {
-        errorMessage = "Failed to initialize COM: 0x" + juce::String::toHexString ((int) hr);
-        error.store (true);
-        running.store (false);
+        setError (ErrorCode::comInitialization, (int) hr);
+        running.store (false, std::memory_order_release);
         SetEvent (startEvent);
         return;
     }
@@ -254,9 +304,20 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         CoUninitialize();
 
         // Every failure path ends here, so start() waiting on this event sees
-        // it and can return the real result (errorMessage is already set).
+        // it and can return the real result (the error code is already set).
         SetEvent (startEvent);
     };
+
+    // Defence in depth: start() refuses an empty id before the thread exists,
+    // but this function is also the last line of defence. GetDefaultAudioEndpoint
+    // would send the processed microphone to the user's headphones.
+    if (deviceId.isEmpty())
+    {
+        setError (ErrorCode::noDeviceChosen);
+        running.store (false, std::memory_order_release);
+        cleanup();
+        return;
+    }
 
     // ---- Get device enumerator ----
     hr = CoCreateInstance (__uuidof (MMDeviceEnumerator), nullptr,
@@ -265,28 +326,21 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                           reinterpret_cast<void**> (&enumerator));
     if (FAILED (hr) || enumerator == nullptr)
     {
-        errorMessage = "Failed to create device enumerator: 0x" + juce::String::toHexString ((int) hr);
-        error.store (true);
-        running.store (false);
+        setError (ErrorCode::deviceEnumerator, (int) hr);
+        running.store (false, std::memory_order_release);
         cleanup();
         return;
     }
 
     // ---- Get render device ----
-    if (deviceId.isEmpty())
-    {
-        hr = enumerator->GetDefaultAudioEndpoint (eRender, eConsole, &device);
-    }
-    else
-    {
-        hr = enumerator->GetDevice (deviceId.toWideCharPointer(), &device);
-    }
+    // Only the endpoint the caller named. There is deliberately no fallback to
+    // the Windows default endpoint.
+    hr = enumerator->GetDevice (deviceId.toWideCharPointer(), &device);
 
     if (FAILED (hr) || device == nullptr)
     {
-        errorMessage = "Failed to get render device: 0x" + juce::String::toHexString ((int) hr);
-        error.store (true);
-        running.store (false);
+        setError (ErrorCode::renderDevice, (int) hr);
+        running.store (false, std::memory_order_release);
         cleanup();
         return;
     }
@@ -296,9 +350,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                            nullptr, reinterpret_cast<void**> (&audioClient));
     if (FAILED (hr) || audioClient == nullptr)
     {
-        errorMessage = "Failed to activate audio client: 0x" + juce::String::toHexString ((int) hr);
-        error.store (true);
-        running.store (false);
+        setError (ErrorCode::activateAudioClient, (int) hr);
+        running.store (false, std::memory_order_release);
         cleanup();
         return;
     }
@@ -307,9 +360,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     hr = audioClient->GetMixFormat (&mixFormat);
     if (FAILED (hr) || mixFormat == nullptr)
     {
-        errorMessage = "Failed to get mix format: 0x" + juce::String::toHexString ((int) hr);
-        error.store (true);
-        running.store (false);
+        setError (ErrorCode::mixFormat, (int) hr);
+        running.store (false, std::memory_order_release);
         cleanup();
         return;
     }
@@ -387,9 +439,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                                   nullptr);
     if (FAILED (hr))
     {
-        errorMessage = "Failed to initialize audio client: 0x" + juce::String::toHexString ((int) hr);
-        error.store (true);
-        running.store (false);
+        setError (ErrorCode::initializeAudioClient, (int) hr);
+        running.store (false, std::memory_order_release);
         cleanup();
         return;
     }
@@ -398,9 +449,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     hr = audioClient->SetEventHandle (renderEvent);
     if (FAILED (hr))
     {
-        errorMessage = "Failed to set event handle: 0x" + juce::String::toHexString ((int) hr);
-        error.store (true);
-        running.store (false);
+        setError (ErrorCode::setEventHandle, (int) hr);
+        running.store (false, std::memory_order_release);
         cleanup();
         return;
     }
@@ -410,9 +460,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                                   reinterpret_cast<void**> (&renderClient));
     if (FAILED (hr) || renderClient == nullptr)
     {
-        errorMessage = "Failed to get render client: 0x" + juce::String::toHexString ((int) hr);
-        error.store (true);
-        running.store (false);
+        setError (ErrorCode::renderClient, (int) hr);
+        running.store (false, std::memory_order_release);
         cleanup();
         return;
     }
@@ -422,9 +471,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     hr = audioClient->GetBufferSize (&bufferSize);
     if (FAILED (hr) || bufferSize == 0)
     {
-        errorMessage = "Failed to get buffer size: 0x" + juce::String::toHexString ((int) hr);
-        error.store (true);
-        running.store (false);
+        setError (ErrorCode::bufferSize, (int) hr);
+        running.store (false, std::memory_order_release);
         cleanup();
         return;
     }
@@ -479,9 +527,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     hr = audioClient->Start();
     if (FAILED (hr))
     {
-        errorMessage = "Failed to start audio client: 0x" + juce::String::toHexString ((int) hr);
-        error.store (true);
-        running.store (false);
+        setError (ErrorCode::startAudioClient, (int) hr);
+        running.store (false, std::memory_order_release);
         cleanup();
         return;
     }
@@ -514,8 +561,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
             if (hr == AUDCLNT_E_DEVICE_INVALIDATED)
             {
-                errorMessage = "Audio device was disconnected";
-                error.store (true);
+                setError (ErrorCode::deviceDisconnected);
                 break;
             }
 
@@ -531,8 +577,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
             if (hr == AUDCLNT_E_DEVICE_INVALIDATED)
             {
-                errorMessage = "Audio device was disconnected";
-                error.store (true);
+                setError (ErrorCode::deviceDisconnected);
                 break;
             }
 
@@ -581,8 +626,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         else
         {
             // WAIT_FAILED or other unexpected return.
-            errorMessage = "WaitForMultipleObjects failed: " + juce::String ((int) GetLastError());
-            error.store (true);
+            setError (ErrorCode::waitFailed, (int) GetLastError());
             break;
         }
     }

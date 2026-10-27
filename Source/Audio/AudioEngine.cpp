@@ -37,41 +37,6 @@ namespace
         return choice;
     }
 
-    std::unique_ptr<juce::XmlElement> makeDeviceState (const juce::String& typeName,
-                                                       const juce::String& inputName,
-                                                       int bufferSize)
-    {
-        auto state = std::make_unique<juce::XmlElement> ("DEVICESETUP");
-        state->setAttribute ("deviceType", typeName);
-        state->setAttribute ("audioInputDeviceName", inputName);
-        state->setAttribute ("audioOutputDeviceName", "");
-        state->setAttribute ("audioDeviceRate", (double) AudioEngine::preferredSampleRate);
-
-        if (bufferSize > 0)
-            state->setAttribute ("audioDeviceBufferSize", bufferSize);
-
-        return state;
-    }
-
-    /// A saved state can come from a build that had monitor output. OneCast
-    /// only opens inputs, so any output endpoint in it has to go before JUCE
-    /// sees it; otherwise the app would open the user's headphones.
-    std::unique_ptr<juce::XmlElement> inputOnlyState (const juce::XmlElement& saved)
-    {
-        auto state = std::make_unique<juce::XmlElement> (saved);
-
-        if (const auto combined = state->getStringAttribute ("audioDeviceName"); combined.isNotEmpty())
-        {
-            if (state->getStringAttribute ("audioInputDeviceName").isEmpty())
-                state->setAttribute ("audioInputDeviceName", combined);
-
-            state->removeAttribute ("audioDeviceName");
-        }
-
-        state->setAttribute ("audioOutputDeviceName", "");
-        state->removeAttribute ("audioDeviceOutChans");
-        return state;
-    }
 }
 
 // ==================================================================
@@ -137,6 +102,51 @@ juce::String AudioEngine::findCableInputId (
     return {};
 }
 
+std::unique_ptr<juce::XmlElement> AudioEngine::makeDeviceState (const juce::String& typeName,
+                                                                const juce::String& inputName,
+                                                                int bufferSize)
+{
+    auto state = std::make_unique<juce::XmlElement> ("DEVICESETUP");
+    state->setAttribute ("deviceType", typeName);
+    state->setAttribute ("audioInputDeviceName", inputName);
+    state->setAttribute ("audioOutputDeviceName", "");
+    // JUCE reads the presence of audioDeviceOutChans as "use exactly these
+    // channels" and its absence as "use the default channel counts". For an
+    // empty output name the defaults could resolve to the Windows output, so
+    // write the attribute explicitly empty: zero output channels.
+    state->setAttribute ("audioDeviceOutChans", "");
+    state->setAttribute ("audioDeviceRate", (double) preferredSampleRate);
+
+    if (bufferSize > 0)
+        state->setAttribute ("audioDeviceBufferSize", bufferSize);
+
+    return state;
+}
+
+std::unique_ptr<juce::XmlElement> AudioEngine::inputOnlyState (const juce::XmlElement& saved)
+{
+    auto state = std::make_unique<juce::XmlElement> (saved);
+
+    if (const auto combined = state->getStringAttribute ("audioDeviceName"); combined.isNotEmpty())
+    {
+        if (state->getStringAttribute ("audioInputDeviceName").isEmpty())
+            state->setAttribute ("audioInputDeviceName", combined);
+
+        state->removeAttribute ("audioDeviceName");
+    }
+
+    // A saved state can come from a build that had monitor output, and a
+    // virtual cable output is never a microphone. Both have to go before JUCE
+    // sees the state, otherwise it would open an endpoint the user did not
+    // choose.
+    if (state->getStringAttribute ("audioInputDeviceName").containsIgnoreCase ("CABLE Output"))
+        state->setAttribute ("audioInputDeviceName", "");
+
+    state->setAttribute ("audioOutputDeviceName", "");
+    state->setAttribute ("audioDeviceOutChans", "");
+    return state;
+}
+
 // ==================================================================
 //  Lifecycle
 // ==================================================================
@@ -146,14 +156,16 @@ void AudioEngine::initialise (const juce::XmlElement* savedDeviceState)
     if (savedDeviceState != nullptr)
     {
         auto state = inputOnlyState (*savedDeviceState);
+        const auto input = state->getStringAttribute ("audioInputDeviceName");
 
-        // A virtual cable output is never a microphone. Passing an empty name
-        // leaves the engine with no device rather than falling back to one the
-        // user did not choose.
-        if (state->getStringAttribute ("audioInputDeviceName").containsIgnoreCase ("CABLE Output"))
-            state->setAttribute ("audioInputDeviceName", "");
-
-        lastDeviceError_ = deviceManager.initialise (2, 0, state.get(), false);
+        // A blank input name must never reach AudioDeviceManager::initialise():
+        // JUCE reads it as "the default device", which would silently open a
+        // microphone the user did not choose. A saved cable input is blanked
+        // by inputOnlyState(), so refuse here instead.
+        if (input.isEmpty())
+            lastDeviceError_ = "no input device chosen";
+        else
+            lastDeviceError_ = deviceManager.initialise (2, 0, state.get(), false);
     }
     else
     {
@@ -208,6 +220,16 @@ juce::AudioIODeviceType* AudioEngine::findDeviceType (const juce::String& name)
 juce::String AudioEngine::openChoice (const juce::String& typeName,
                                       const juce::String& inputName, int bufferSize)
 {
+    // Every path that can end up without a usable microphone (all inputs are
+    // CABLE Outputs, a saved cable input, an empty API list) arrives here with
+    // a blank name. JUCE would treat that as "the default device", so refuse
+    // before initialise() is called.
+    if (inputName.isEmpty())
+    {
+        lastDeviceError_ = "no input device chosen";
+        return lastDeviceError_;
+    }
+
     auto state = makeDeviceState (typeName, inputName, bufferSize);
     return deviceManager.initialise (2, 0, state.get(), false);
 }
@@ -316,7 +338,11 @@ bool AudioEngine::setInputDevice (const juce::String& name)
     setup.outputDeviceName = {};
     setup.sampleRate       = (double) preferredSampleRate;
     setup.useDefaultInputChannels  = true;
-    setup.useDefaultOutputChannels = true;
+    // Input-only means exactly zero output channels, not "whatever JUCE's
+    // default output layout is": the latter would depend on the empty output
+    // name never being resolved to a device.
+    setup.outputChannels.clear();
+    setup.useDefaultOutputChannels = false;
 
     lastDeviceError_ = deviceManager.setAudioDeviceSetup (setup, true);
 
@@ -555,6 +581,8 @@ std::unique_ptr<juce::XmlElement> AudioEngine::getChosenDeviceState() const
     state->setAttribute ("deviceType",            deviceManager.getCurrentAudioDeviceType());
     state->setAttribute ("audioOutputDeviceName", setup.outputDeviceName);
     state->setAttribute ("audioInputDeviceName",  setup.inputDeviceName);
+    // Input-only: an explicit empty channel layout, never the default outputs.
+    state->setAttribute ("audioDeviceOutChans",   "");
     state->setAttribute ("audioDeviceRate",       device->getCurrentSampleRate());
     state->setAttribute ("audioDeviceBufferSize", device->getCurrentBufferSizeSamples());
     return state;
@@ -594,10 +622,12 @@ bool AudioEngine::reopenDevice (const juce::XmlElement& state)
 
     auto clean = inputOnlyState (state);
 
-    if (clean->getStringAttribute ("audioInputDeviceName").containsIgnoreCase ("CABLE Output"))
-        clean->setAttribute ("audioInputDeviceName", "");
-
-    lastDeviceError_ = deviceManager.initialise (2, 0, clean.get(), false);
+    // Same guard as initialise(): a blank name would ask JUCE for the default
+    // microphone, so fail the reopen instead of opening something else.
+    if (clean->getStringAttribute ("audioInputDeviceName").isEmpty())
+        lastDeviceError_ = "no input device chosen";
+    else
+        lastDeviceError_ = deviceManager.initialise (2, 0, clean.get(), false);
 
     if (auto* device = deviceManager.getCurrentAudioDevice())
         StartupLog::mark ("reopen: type=\"" + device->getTypeName() + "\" device=\""
