@@ -6,11 +6,17 @@
 
 namespace
 {
-    std::vector<ModuleCard::Knob> oneKnob (const juce::String& label,
+    std::vector<ModuleCard::Knob> oneKnob (const juce::String& cardTitle,
+                                           const juce::String& label,
                                            const ParamRange& range,
                                            const juce::String& unit)
     {
-        return { ModuleCard::Knob { label, range, unit } };
+        // When a card has one knob, the title already names it. Repeating the
+        // word under the title only adds noise; a knob with a different name
+        // ("Mức", "Ngưỡng", "Gain ra") still needs its label.
+        const auto shownLabel = label == cardTitle ? juce::String() : label;
+
+        return { ModuleCard::Knob { shownLabel, range, unit } };
     }
 }
 
@@ -24,17 +30,21 @@ ChainPanel::ChainPanel (MainComponent& owner)
     noiseModes.add (Strings::noiseAi());
 
     preGainCard = std::make_unique<ModuleCard> (Strings::preGain(), false,
-                      oneKnob (Strings::preGain(), ParamRanges::preGainDb, "dB"));
+                      oneKnob (Strings::preGain(), Strings::preGain(),
+                               ParamRanges::preGainDb, "dB"));
 
     hpfCard = std::make_unique<ModuleCard> (Strings::hpf(), true,
-                  oneKnob (Strings::hpf(), ParamRanges::hpfHz, "Hz"));
+                  oneKnob (Strings::hpf(), Strings::hpf(),
+                           ParamRanges::hpfHz, "Hz"));
 
     noiseCard = std::make_unique<ModuleCard> (Strings::noise(), false,
-                    oneKnob (Strings::amount(), ParamRanges::noiseAmount, "%"),
+                    oneKnob (Strings::noise(), Strings::amount(),
+                             ParamRanges::noiseAmount, "%"),
                     noiseModes);
 
     gateCard = std::make_unique<ModuleCard> (Strings::gate(), true,
-                   oneKnob (Strings::threshold(), ParamRanges::gateThresholdDb, "dB"),
+                   oneKnob (Strings::gate(), Strings::threshold(),
+                            ParamRanges::gateThresholdDb, "dB"),
                    juce::StringArray(), true);
 
     eqCard = std::make_unique<ModuleCard> (Strings::eq(), true,
@@ -51,11 +61,13 @@ ChainPanel::ChainPanel (MainComponent& owner)
                    juce::StringArray(), true);
 
     deEssCard = std::make_unique<ModuleCard> (Strings::deEsser(), true,
-                     oneKnob (Strings::amount(), ParamRanges::deEssAmount, "%"),
+                     oneKnob (Strings::deEsser(), Strings::amount(),
+                              ParamRanges::deEssAmount, "%"),
                      juce::StringArray(), true);
 
     outputCard = std::make_unique<ModuleCard> (Strings::output(), false,
-                      oneKnob (Strings::outputGain(), ParamRanges::outputGainDb, "dB"),
+                      oneKnob (Strings::output(), Strings::outputGain(),
+                               ParamRanges::outputGainDb, "dB"),
                       juce::StringArray(), true);
 
     cards = { preGainCard.get(), hpfCard.get(), noiseCard.get(), gateCard.get(),

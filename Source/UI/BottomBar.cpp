@@ -101,7 +101,14 @@ void BottomBar::reloadPresets()
 //==============================================================================
 void BottomBar::refresh()
 {
-    const auto& settings = main.getSettings();
+    auto& settings = main.getSettings();
+
+    // The first run has no stored preset name, but the default parameters are
+    // exactly "Tự nhiên". Matching on every refresh also covers a user who
+    // dialled the controls back to a built-in sound: the combo then shows the
+    // preset that is actually running instead of nothing.
+    if (settings.presetName.isEmpty())
+        settings.presetName = matchingBuiltInPreset (settings.params);
 
     muteButton.setToggleState (settings.params.mute, juce::dontSendNotification);
     bypassButton.setToggleState (settings.params.bypass, juce::dontSendNotification);
@@ -163,6 +170,31 @@ bool BottomBar::isBuiltInName (const juce::String& name)
     return false;
 }
 
+juce::String BottomBar::matchingBuiltInPreset (const VoiceParams& params)
+{
+    // applyPreset keeps the user's pre-gain, bypass and mute, so comparing its
+    // result with the current parameters ignores exactly those three.
+    for (const auto& preset : PresetLibrary::builtIns())
+        if (applyPreset (params, preset.params) == params)
+            return preset.name;
+
+    return {};
+}
+
+void BottomBar::showPresetError (const juce::String& title, const juce::String& message)
+{
+    // Two callers: delete, and the save prompt's modal callback. Posting keeps
+    // the window from being opened while the prompt is still closing.
+    juce::MessageManager::callAsync ([title, message]()
+    {
+        auto* window = new juce::AlertWindow (title, message,
+                                              juce::MessageBoxIconType::WarningIcon);
+        window->addButton (Strings::dismiss(), 1,
+                           juce::KeyPress (juce::KeyPress::returnKey));
+        window->enterModalState (true, nullptr, true);
+    });
+}
+
 void BottomBar::savePreset()
 {
     promptForPresetName (main.getSettings().presetName, false);
@@ -220,6 +252,12 @@ void BottomBar::promptForPresetName (juce::String suggested, bool nameWasTaken)
                 safeThis->main.settingsChanged();
                 safeThis->reloadPresets();
             }
+            else
+            {
+                // The name was valid and not built in, so the only reason left
+                // is that the preset file could not be written.
+                showPresetError (Strings::savePreset(), Strings::presetSaveFailed());
+            }
         }),
         false);
 }
@@ -245,6 +283,12 @@ void BottomBar::deleteSelectedPreset()
 
         main.settingsChanged();
         reloadPresets();
+    }
+    else
+    {
+        // Built-in names are filtered above and the combo only lists known
+        // presets, so a false here means the file could not be removed.
+        showPresetError (Strings::deletePreset(), Strings::presetDeleteFailed());
     }
 }
 

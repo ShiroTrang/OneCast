@@ -134,9 +134,5 @@ private:
 
     juce::Rectangle<int> chainArea;
 
-    /// The window limits are applied once from resized(), when the content and
-    /// its top-level window have real bounds.
-    bool windowLimitsApplied = false;
-
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

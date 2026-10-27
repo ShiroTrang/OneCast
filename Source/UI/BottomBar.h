@@ -48,6 +48,14 @@ private:
     void promptForPresetName (juce::String suggested, bool nameWasTaken);
     void deleteSelectedPreset();
 
+    /// The name of a built-in whose processing exactly matches `params`, with
+    /// pre-gain, bypass and mute ignored just like applyPreset() ignores them.
+    static juce::String matchingBuiltInPreset (const VoiceParams& params);
+
+    /// A disk or permission failure looked silent; say so. Posted asynchronously
+    /// because the save path calls it from inside a closing modal window.
+    static void showPresetError (const juce::String& title, const juce::String& message);
+
     static bool isBuiltInName (const juce::String& name);
 
     MainComponent& main;

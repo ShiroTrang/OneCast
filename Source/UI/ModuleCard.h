@@ -56,8 +56,6 @@ private:
     class PowerButton;
 
     void applyDimming();
-    static juce::String suffixFor (const juce::String& unit);
-    static int decimalPlacesFor (const juce::String& unit);
 
     juce::String title;
     bool hasReduction = false;

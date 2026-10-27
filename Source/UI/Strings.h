@@ -56,6 +56,8 @@ namespace Strings
     inline juce::String deletePreset()     { return juce::String (juce::CharPointer_UTF8 ("Xoá preset")); }
     inline juce::String presetNamePrompt() { return juce::String (juce::CharPointer_UTF8 ("Tên preset:")); }
     inline juce::String presetNameTaken()  { return juce::String (juce::CharPointer_UTF8 ("Tên này trùng với preset có sẵn. Hãy chọn tên khác.")); }
+    inline juce::String presetSaveFailed()   { return juce::String (juce::CharPointer_UTF8 ("Không lưu được preset. Kiểm tra quyền ghi của thư mục %APPDATA%\\OneCast\\Presets.")); }
+    inline juce::String presetDeleteFailed() { return juce::String (juce::CharPointer_UTF8 ("Không xoá được preset.")); }
     inline juce::String options()          { return juce::String (juce::CharPointer_UTF8 ("Tuỳ chọn")); }
     inline juce::String startWithWindows() { return juce::String (juce::CharPointer_UTF8 ("Chạy cùng Windows")); }
     inline juce::String startMinimized()   { return juce::String (juce::CharPointer_UTF8 ("Khởi động thu nhỏ")); }

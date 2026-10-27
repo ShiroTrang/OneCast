@@ -1,6 +1,7 @@
 #include "ModuleCard.h"
 #include "Strings.h"
 #include "Theme.h"
+#include "ValueText.h"
 
 #include <cmath>
 #include <utility>
@@ -74,6 +75,11 @@ public:
         g.setColour (juce::Colours::white.withAlpha (0.85f));
         g.fillPath (pointer);
     }
+
+    /// The value readout is a Label created by createSliderTextBox and only
+    /// takes its font from the look, so give it the same aligned figures as the
+    /// rest of the UI.
+    juce::Font getLabelFont (juce::Label&) override { return Theme::valueFont(); }
 };
 
 //==============================================================================
@@ -164,17 +170,49 @@ ModuleCard::ModuleCard (juce::String titleText, bool hasToggle,
 
         auto slider = std::make_unique<juce::Slider> (juce::Slider::RotaryVerticalDrag,
                                                       juce::Slider::TextBoxBelow);
+        const auto kind = ValueText::kindForUnit (spec.unit);
+        const auto range = spec.range;
+        auto* sliderPtr = slider.get();
+
         slider->setRange (spec.range.min, spec.range.max);
         slider->setValue (spec.range.defaultValue, juce::dontSendNotification);
         slider->setDoubleClickReturnValue (true, spec.range.defaultValue);
-        slider->setTextBoxStyle (juce::Slider::TextBoxBelow, false, 0, 18);
-        slider->setTextBoxIsEditable (false);
-        slider->setNumDecimalPlacesToDisplay (decimalPlacesFor (spec.unit));
-        slider->setTextValueSuffix (suffixFor (spec.unit));
+
+        // The readout carries its unit and is the edit field as well, so the
+        // card never shows two different numbers for the same knob.
+        slider->textFromValueFunction = [kind] (double value)
+        {
+            return ValueText::format ((float) value, kind);
+        };
+        slider->valueFromTextFunction = [kind, range, sliderPtr] (const juce::String& text)
+        {
+            const auto parsed = ValueText::parse (text, kind, range);
+
+            // Unparseable text must not move the knob. Returning the current
+            // value makes the slider see no change and send no notification.
+            return parsed.has_value() ? (double) *parsed : sliderPtr->getValue();
+        };
+
+        slider->setLookAndFeel (lookAndFeel.get());
+
+        // Set on the slider after the look, so they win over the look's copy and
+        // the readout sits in the card instead of looking like a text control.
+        slider->setColour (juce::Slider::textBoxTextColourId,       Theme::textPrimary);
+        slider->setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
+        slider->setColour (juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
+        slider->setColour (juce::Slider::textBoxHighlightColourId,  Theme::accentDim);
+
+        slider->setTextBoxStyle (juce::Slider::TextBoxBelow, false, 76, 18);
+        slider->setTextBoxIsEditable (true);
+
+        // Creating or replacing the text box copies the text it had before the
+        // format functions were installed, so ask for a fresh readout once the
+        // box exists.
+        slider->updateText();
+
         slider->setColour (juce::Slider::thumbColourId, Theme::accent);
         slider->setColour (juce::Slider::rotarySliderFillColourId, Theme::accent);
         slider->setColour (juce::Slider::rotarySliderOutlineColourId, Theme::wellBg);
-        slider->setLookAndFeel (lookAndFeel.get());
         slider->setMouseCursor (juce::MouseCursor::PointingHandCursor);
         slider->onValueChange = [this, i]()
         {
@@ -276,24 +314,6 @@ void ModuleCard::setReductionDb (float db)
 }
 
 //==============================================================================
-juce::String ModuleCard::suffixFor (const juce::String& unit)
-{
-    if (unit.isEmpty())
-        return {};
-
-    // A percentage and a ratio read better without a space ("100%" / "3.0:1").
-    if (unit == "%" || unit.startsWith (":"))
-        return unit;
-
-    return " " + unit;
-}
-
-int ModuleCard::decimalPlacesFor (const juce::String& unit)
-{
-    // Hz and percent are whole numbers; dB and the compressor ratio are not.
-    return (unit == "Hz" || unit == "%") ? 0 : 1;
-}
-
 void ModuleCard::applyDimming()
 {
     // A module that is off stays adjustable, so its setting can be prepared
@@ -308,6 +328,10 @@ void ModuleCard::applyDimming()
 
     for (auto& button : modeButtons)
         button->setAlpha (alpha);
+
+    // Child alpha does not touch the card's own title colour or its reduction
+    // bar, so the card has to redraw itself when the switch moves.
+    repaint();
 }
 
 //==============================================================================

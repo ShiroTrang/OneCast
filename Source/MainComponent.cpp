@@ -202,20 +202,10 @@ void MainComponent::resized()
     chain.removeFromBottom (Theme::gap);
     chainPanel.setBounds (chain);
 
-    // Two rows of four cards need the full 1280 x 720 content area. The frame
-    // is added because setResizeLimits measures the whole window, while the
-    // cards live in the content component.
-    if (! windowLimitsApplied && getWidth() >= 1280 && getHeight() >= 720)
-    {
-        if (auto* window = findParentComponentOfClass<juce::DocumentWindow>())
-        {
-            const int frameWidth  = juce::jmax (0, window->getWidth() - getWidth());
-            const int frameHeight = juce::jmax (0, window->getHeight() - getHeight());
-
-            window->setResizeLimits (1280 + frameWidth, 720 + frameHeight, 10000, 10000);
-            windowLimitsApplied = true;
-        }
-    }
+    // The 1280 x 720 minimum is applied by MainWindow right after it adopts
+    // this component. Doing it here was not dependable: resized() need not run
+    // again after the window exists, so a window created at another size could
+    // be dragged below the size the eight cards need.
 }
 
 //==============================================================================
