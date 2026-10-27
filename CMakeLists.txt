@@ -157,3 +157,42 @@ target_link_libraries(OneCastTests PRIVATE
     juce::juce_recommended_warning_flags
     mmdevapi
 )
+
+# -----------------------------------------------------------------------------
+# Offline renderer: the voice chain over a WAV file, with no audio device.
+#   cmake --build build --config Release --target OneCastRender
+#   build\OneCastRender_artefacts\Release\OneCastRender.exe in.wav out.wav
+# -----------------------------------------------------------------------------
+juce_add_console_app(OneCastRender PRODUCT_NAME "OneCastRender")
+
+target_sources(OneCastRender PRIVATE
+    tools/Render.cpp
+    Source/Audio/SafetyLimiter.h
+    ${ONECAST_DSP_SOURCES}
+    ${ONECAST_SESSION_SOURCES}
+)
+
+juce_generate_juce_header(OneCastRender)
+
+target_compile_definitions(OneCastRender PRIVATE
+    JUCE_WASAPI=1
+    JUCE_DIRECTSOUND=0
+    JUCE_USE_WINRT_MIDI=0
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    NOMINMAX=1
+    WIN32_LEAN_AND_MEAN=1
+)
+
+target_compile_options(OneCastRender PRIVATE /utf-8)
+
+target_link_libraries(OneCastRender PRIVATE
+    rnnoise
+    juce::juce_audio_basics
+    juce::juce_audio_formats
+    juce::juce_core
+    juce::juce_dsp
+    juce::juce_events
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags
+)
