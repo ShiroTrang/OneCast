@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include "Strings.h"
 #include "Theme.h"
 
 /** A slide-in alert banner that appears just below the header bar.
@@ -23,7 +24,7 @@ public:
     //==========================================================================
     AlertBanner()
     {
-        dismissButton.setButtonText ("Dismiss");
+        dismissButton.setButtonText (Strings::dismiss());
         Theme::styleTextButton (dismissButton, juce::Colours::transparentBlack,
                                 juce::Colours::white);
         dismissButton.onClick = [this]() { dismiss(); };

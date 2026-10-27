@@ -1,7 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 
-/** Central design tokens for the LiveVocal UI.
+/** Central design tokens for the OneCast UI.
 
     Every panel pulls its colours, fonts and metrics from here so the whole app
     shares one visual language instead of each component inventing its own
