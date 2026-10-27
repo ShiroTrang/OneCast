@@ -145,6 +145,9 @@ target_compile_definitions(OneCastTests PRIVATE
 
 target_compile_options(OneCastTests PRIVATE /utf-8)
 
+# tools/ProbeAnalyzer.h is shared with the OneCastProbe tool below.
+target_include_directories(OneCastTests PRIVATE tools)
+
 target_link_libraries(OneCastTests PRIVATE
     rnnoise
     juce::juce_audio_basics
@@ -152,6 +155,44 @@ target_link_libraries(OneCastTests PRIVATE
     juce::juce_audio_formats
     juce::juce_core
     juce::juce_dsp
+    juce::juce_events
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags
+    mmdevapi
+)
+
+# -----------------------------------------------------------------------------
+# OneCastProbe: records "CABLE Output" and reports dropouts, phase jumps and
+# level dips in a test sine (used by the soak test). The glitch detector itself
+# is tools/ProbeAnalyzer.h, which OneCastTests covers without any device.
+#   build\OneCastProbe_artefacts\Release\OneCastProbe.exe --self-test
+# -----------------------------------------------------------------------------
+juce_add_console_app(OneCastProbe PRODUCT_NAME "OneCastProbe")
+
+target_sources(OneCastProbe PRIVATE
+    tools/Probe.cpp
+    tools/ProbeAnalyzer.h
+)
+
+juce_generate_juce_header(OneCastProbe)
+
+target_compile_definitions(OneCastProbe PRIVATE
+    JUCE_WASAPI=1
+    JUCE_DIRECTSOUND=0
+    JUCE_USE_WINRT_MIDI=0
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    NOMINMAX=1
+    WIN32_LEAN_AND_MEAN=1
+)
+
+target_compile_options(OneCastProbe PRIVATE /utf-8)
+
+target_link_libraries(OneCastProbe PRIVATE
+    juce::juce_audio_basics
+    juce::juce_audio_devices
+    juce::juce_audio_formats
+    juce::juce_core
     juce::juce_events
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags
