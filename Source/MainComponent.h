@@ -6,6 +6,8 @@
 #include "Platform/DeviceHotplug.h"
 #include "Session/Settings.h"
 #include "UI/AlertBanner.h"
+#include "UI/BottomBar.h"
+#include "UI/ChainPanel.h"
 #include "UI/DevicePanel.h"
 
 #include <functional>
@@ -46,6 +48,11 @@ public:
 
     void paint (juce::Graphics& g) override;
     void resized() override;
+
+    /// The chain panel lives here so Task 14's tray and hotkey can refresh the
+    /// view after changing mute from outside the window.
+    ChainPanel& getChainPanel() noexcept;
+    BottomBar& getBottomBar() noexcept;
 
 private:
     // Which alert is on screen, so recovering from one condition does not
@@ -99,6 +106,8 @@ private:
     AudioEngine engine;
     DevicePanel devicePanel;
     AlertBanner alertBanner;
+    ChainPanel chainPanel   { *this };
+    BottomBar bottomBar     { *this };
     DeviceHotplug deviceHotplug;
     DeviceRecovery deviceRecovery;
 
@@ -124,6 +133,10 @@ private:
     BannerKind currentBanner = BannerKind::none;
 
     juce::Rectangle<int> chainArea;
+
+    /// The window limits are applied once from resized(), when the content and
+    /// its top-level window have real bounds.
+    bool windowLimitsApplied = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

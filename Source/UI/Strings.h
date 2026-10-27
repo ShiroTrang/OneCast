@@ -46,6 +46,8 @@ namespace Strings
     inline juce::String outputGain()       { return juce::String (juce::CharPointer_UTF8 ("Gain ra")); }
     inline juce::String meterIn()          { return juce::String (juce::CharPointer_UTF8 ("Vào")); }
     inline juce::String meterOut()         { return juce::String (juce::CharPointer_UTF8 ("Ra")); }
+    inline juce::String clip()             { return juce::String (juce::CharPointer_UTF8 ("CLIP")); }
+    inline juce::String reduction()        { return juce::String (juce::CharPointer_UTF8 ("Giảm")); }
     inline juce::String mute()             { return juce::String (juce::CharPointer_UTF8 ("MUTE")); }
     inline juce::String muted()            { return juce::String (juce::CharPointer_UTF8 ("ĐANG TẮT TIẾNG")); }
     inline juce::String bypass()           { return juce::String (juce::CharPointer_UTF8 ("Bypass")); }
