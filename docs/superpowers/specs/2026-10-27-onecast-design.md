@@ -37,7 +37,7 @@ compressor, gate, de-esser được chỉnh theo giọng nói.
    (ví dụ Voicemeeter Input).
 4. **Không vỡ tiếng**: không mẫu nào ra khỏi app vượt -1 dBFS.
 5. **Độ trễ thấp nhất có thể**. App hiển thị tổng độ trễ mà nó biết được.
-6. **Khử ồn hai chế độ**: AI (RNNoise, khoảng 20 ms) và Nhẹ (lọc phổ, ≤ 6 ms).
+6. **Khử ồn hai chế độ**: AI (RNNoise, khoảng 30 ms) và Nhẹ (lọc phổ, ≤ 6 ms).
    **Mặc định: AI** (người dùng đã chọn).
 7. Lưu và khôi phục toàn bộ thiết lập. Có preset sẵn và preset người dùng tự lưu.
 8. Tự phục hồi khi rút/cắm mic hoặc interface, và khi CABLE Input mất hoặc trở lại.
@@ -116,7 +116,7 @@ Pre-gain           mặc định +6 dB, dải -12..+24 dB
    ▼
 Lọc cắt trầm (HPF) mặc định 80 Hz, dải 40-200 Hz, dốc 12-18 dB/oct
    ▼
-Khử ồn             Tắt | Nhẹ (≤ 6 ms) | AI RNNoise (~20 ms)   [mặc định AI, mức 100%]
+Khử ồn             Tắt | Nhẹ (≤ 6 ms) | AI RNNoise (~30 ms)   [mặc định AI, mức 100%]
    ▼
 Noise gate mềm     downward expander, có hysteresis + hold, 0 ms
    ▼
@@ -161,8 +161,9 @@ ngưỡng đặt thấp được và ít cắt mất đầu/cuối chữ.
   chuỗi vẫn chạy ở rate của thiết bị. Riêng khâu AI thì resample sang 48 kHz và
   ngược lại ngay trong khâu đó; độ trễ báo cáo phải tính cả phần resample.
   (Quyết định của orchestrator.)
-- **AI (RNNoise)**: gom khung 480 mẫu qua FIFO, thêm khoảng 960 mẫu trễ (≈ 20 ms ở
-  48 kHz). "Mức độ" 0-100% trộn tín hiệu khô (đã delay khớp pha) với tín hiệu ướt.
+- **AI (RNNoise)**: gom khung 480 mẫu qua FIFO, thêm 1440 mẫu trễ (≈ 30 ms ở
+  48 kHz: 480 mẫu gom khung + 960 mẫu trễ nội tại của RNNoise 0.2, vốn nhìn trước một
+  khung; đo thực tế ở Task 5). "Mức độ" 0-100% trộn tín hiệu khô (đã delay khớp pha) với tín hiệu ướt.
   Có thể dùng xác suất VAD của RNNoise để hỗ trợ gate (builder tự quyết).
 - **Nhẹ**: STFT ngắn (gợi ý FFT 256, hop 64, cửa sổ sqrt-Hann), ước lượng nhiễu
   thích ứng (minimum statistics hoặc MCRA), gain kiểu Wiener có làm mượt và mức giảm
@@ -176,7 +177,7 @@ ngưỡng đặt thấp được và ít cắt mất đầu/cuối chữ.
 | Khâu | Trễ |
 |---|---|
 | ASIO buffer 128 mẫu (mặc định) | ≈ 2.7 ms + trễ driver báo |
-| Khử ồn AI / Nhẹ / Tắt | ≈ 20 ms / ≤ 6 ms / 0 |
+| Khử ồn AI / Nhẹ / Tắt | ≈ 30 ms / ≤ 6 ms / 0 |
 | Limiter | 1 ms |
 | Ring + WASAPI shared ra CABLE Input | ≈ 1 period thiết bị (thường 10 ms) + 2 ms |
 | Bên trong VB-Cable | theo cài đặt của VB-Cable, app không kiểm soát |
