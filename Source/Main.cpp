@@ -43,11 +43,44 @@ public:
 
         auto* content = static_cast<MainComponent*> (mainWindow->getContentComponent());
 
+        // The content has loaded the settings by now. A quiet launch comes from
+        // the autostart entry (--minimized) or from the saved option; the tray
+        // icon is the way in, and a second instance also brings the window up.
+        const bool startHidden = startMinimized || content->getSettings().startMinimized;
+
+        content->onShowWindow = [this]() { showMainWindow(); };
+
+        // Quit from the tray menu: the menu callback is running inside the tray
+        // component, so the app is torn down on the next message instead of
+        // under its own feet.
+        content->onQuit = []()
+        {
+            juce::MessageManager::callAsync ([]()
+            {
+                if (auto* app = juce::JUCEApplication::getInstance())
+                    app->quit();
+            });
+        };
+
         if (testSignal)
             content->getEngine().setTestSignal (true);
 
         if (snapshotPath.isNotEmpty())
+        {
+            // A screenshot needs a visible window even when the launch asked
+            // for the tray; the app quits as soon as the PNG is written.
+            showMainWindow();
             scheduleSnapshot (snapshotPath, snapshotDelayMs);
+        }
+        else if (! startHidden)
+        {
+            showMainWindow();
+        }
+        else
+        {
+            StartupLog::mark ("started minimised: window hidden");
+            StartupLog::flush();
+        }
     }
 
     void shutdown() override
@@ -56,6 +89,13 @@ public:
 
         // Every component that referenced it is gone by now.
         juce::Desktop::getInstance().setDefaultLookAndFeel (nullptr);
+    }
+
+    void anotherInstanceStarted (const juce::String&) override
+    {
+        // The second process hands over its command line and exits; the running
+        // instance is what the user was trying to bring back.
+        showMainWindow();
     }
 
     void systemRequestedQuit() override
@@ -89,25 +129,50 @@ public:
                 setResizeLimits (1280 + frameWidth, 720 + frameHeight, 10000, 10000);
             }
 
-            // Respect the content's own preferred size.
+            // Respect the content's own preferred size. Visibility is decided
+            // by the application, because --minimized and the saved startMinimized
+            // option open the window hidden in the tray.
             centreWithSize (getWidth(), getHeight());
-            setVisible (true);
+        }
 
-            // Everything before this point delayed the first paint.
-            StartupLog::mark ("window visible (first paint)");
-            StartupLog::flush();
+        /// Shows the window again after the close button hid it, after a quiet
+        /// start, or when a second instance was launched.
+        void showFromTray()
+        {
+            setVisible (true);
+            setMinimised (false);
+            toFront (true);
+
+            // The first paint is the interesting one for the start-up log; a
+            // return from the tray does not need a second entry.
+            if (! hasBeenShown)
+            {
+                hasBeenShown = true;
+                StartupLog::mark ("window visible (first paint)");
+                StartupLog::flush();
+            }
         }
 
         void closeButtonPressed() override
         {
-            JUCEApplication::getInstance()->systemRequestedQuit();
+            // The close button hides the window: the processing chain and the
+            // tray icon must keep running. Quit lives in the tray menu.
+            setVisible (false);
         }
 
     private:
+        bool hasBeenShown = false;
+
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)
     };
 
 private:
+    void showMainWindow()
+    {
+        if (mainWindow != nullptr)
+            mainWindow->showFromTray();
+    }
+
     /// The screenshot is taken on the message thread after the window has had
     /// time to paint, then the app quits. The safe pointer keeps a closed
     /// window from being touched if the user got there first.

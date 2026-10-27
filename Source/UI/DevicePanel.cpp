@@ -2,6 +2,8 @@
 #include "Strings.h"
 #include "Theme.h"
 
+#include <cmath>
+
 namespace
 {
     constexpr int labelGap = 4;
@@ -22,6 +24,58 @@ namespace
     constexpr int statusW  = 112;
     constexpr int latencyW = 150;
     constexpr int headerH  = 16;
+
+    // The gear sits in the header line, so it stays clear of the device fields
+    // a long input name can squeeze.
+    constexpr int optionsW = 96;
+    constexpr int optionsH = 18;
+}
+
+//==============================================================================
+DevicePanel::OptionsButton::OptionsButton()
+    : Button (Strings::options())
+{
+}
+
+void DevicePanel::OptionsButton::paintButton (juce::Graphics& g,
+                                              bool shouldDrawButtonAsHighlighted,
+                                              bool shouldDrawButtonAsDown)
+{
+    auto bounds = getLocalBounds().toFloat();
+
+    g.setColour (shouldDrawButtonAsDown ? Theme::accentDim
+                 : shouldDrawButtonAsHighlighted ? Theme::cardBgAlt.brighter (0.12f)
+                                                 : Theme::cardBgAlt);
+    g.fillRoundedRectangle (bounds, 4.0f);
+    g.setColour (Theme::border);
+    g.drawRoundedRectangle (bounds.reduced (0.5f), 4.0f, 1.0f);
+
+    // A small cog drawn from eight teeth around a ring: at this size an icon
+    // font would be at the mercy of installed fonts, and an image would need a
+    // resource file.
+    const auto icon = bounds.removeFromLeft (bounds.getHeight()).reduced (2.0f);
+    const auto centre = icon.getCentre();
+    const float outer = icon.getHeight() * 0.42f;
+    const float inner = outer * 0.60f;
+
+    g.setColour (Theme::textSecondary);
+
+    for (int i = 0; i < 8; ++i)
+    {
+        const float angle = juce::MathConstants<float>::twoPi * (float) i / 8.0f;
+        const auto direction = juce::Point<float> (std::cos (angle), std::sin (angle));
+
+        g.drawLine ({ centre + direction * inner, centre + direction * outer }, 1.4f);
+    }
+
+    g.drawEllipse (centre.x - inner, centre.y - inner, inner * 2.0f, inner * 2.0f, 1.4f);
+    g.fillEllipse (centre.x - inner * 0.35f, centre.y - inner * 0.35f,
+                   inner * 0.7f, inner * 0.7f);
+
+    g.setColour (Theme::textPrimary);
+    g.setFont (Theme::font (12.0f));
+    g.drawText (getButtonText(), bounds.reduced (3.0f, 0.0f),
+                juce::Justification::centredLeft, false);
 }
 
 //==============================================================================
@@ -55,6 +109,14 @@ DevicePanel::DevicePanel()
     latencyLabel.setText (Strings::latency().replace ("%1", juce::String (0.0f, 1)),
                           juce::dontSendNotification);
     addAndMakeVisible (latencyLabel);
+
+    optionsButton.setTooltip (Strings::options());
+    optionsButton.onClick = [this]()
+    {
+        if (onOptionsClicked != nullptr)
+            onOptionsClicked();
+    };
+    addAndMakeVisible (optionsButton);
 
     buildCombos();
     setSize (900, preferredHeight);
@@ -248,6 +310,11 @@ void DevicePanel::setLatencyMs (float milliseconds)
         latencyLabel.setText (text, juce::dontSendNotification);
 }
 
+juce::Rectangle<int> DevicePanel::getOptionsButtonBounds() const noexcept
+{
+    return optionsButton.getBounds();
+}
+
 //==============================================================================
 void DevicePanel::paint (juce::Graphics& g)
 {
@@ -284,6 +351,10 @@ void DevicePanel::resizedControls()
     // The heading/status line. The latency sits at the far right.
     auto header = content.removeFromTop (headerH);
     content.removeFromTop (Theme::gapSmall);
+
+    auto optionsArea = header.removeFromRight (optionsW);
+    optionsButton.setBounds (optionsArea.withSizeKeepingCentre (optionsW, optionsH));
+    header.removeFromRight (Theme::gapSmall);
 
     latencyArea = header.removeFromRight (latencyW);
     header.removeFromRight (Theme::gapSmall);

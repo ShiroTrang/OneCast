@@ -4,11 +4,13 @@
 #include "Audio/AudioEngine.h"
 #include "Audio/DeviceRecovery.h"
 #include "Platform/DeviceHotplug.h"
+#include "Platform/GlobalHotkey.h"
 #include "Session/Settings.h"
 #include "UI/AlertBanner.h"
 #include "UI/BottomBar.h"
 #include "UI/ChainPanel.h"
 #include "UI/DevicePanel.h"
+#include "UI/TrayIcon.h"
 
 #include <functional>
 #include <memory>
@@ -45,6 +47,16 @@ public:
 
     /// Called on the message thread after setMuted(), for the tray icon.
     std::function<void (bool muted)> onMuteChanged;
+
+    /// Wired by the application, because the window and the quit call belong
+    /// to it: the tray only reports what the user asked for.
+    std::function<void()> onShowWindow;
+    std::function<void()> onQuit;
+
+    /// Registers the shortcut typed in the options callout. False when the
+    /// text is not a valid combination or another application owns it; the
+    /// previously registered shortcut then stays in place.
+    bool applyMuteHotkey (const juce::String& text);
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -101,6 +113,11 @@ private:
     void dismissBanner (BannerKind kind);
     void logDeviceEvent (const juce::String& what);
 
+    // Tray, shortcut and options
+    void reconcileStartWithWindows();
+    void applySavedHotkey();
+    void showOptions();
+
     //==========================================================================
     AppSettings settings;
     AudioEngine engine;
@@ -110,6 +127,8 @@ private:
     BottomBar bottomBar     { *this };
     DeviceHotplug deviceHotplug;
     DeviceRecovery deviceRecovery;
+    TrayIcon trayIcon;
+    GlobalHotkey hotkey;
 
     /// The device to bring back after an unplug, and what the output was called
     /// for the banner while it is away.
