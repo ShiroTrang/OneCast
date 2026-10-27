@@ -12,6 +12,13 @@
 
 $ErrorActionPreference = 'SilentlyContinue'
 
+# The "Go OneCast" shortcut starts uninstall.cmd with the program folder as its
+# working directory, and that cmd shim inherits it when it launches us. A
+# PowerShell whose current directory is inside $target cannot delete $target
+# (the folder is in use), so move out of the way before touching anything.
+Set-Location $env:TEMP
+[Environment]::CurrentDirectory = $env:TEMP
+
 $target   = Join-Path $env:LOCALAPPDATA 'Programs\OneCast'
 $appData  = Join-Path $env:APPDATA 'OneCast'
 $startDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'

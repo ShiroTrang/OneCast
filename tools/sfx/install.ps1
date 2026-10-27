@@ -59,9 +59,13 @@ if (-not (Test-Path $uninstallSource)) {
 $uninstallScript = Join-Path $appData 'uninstall.ps1'
 Copy-Item -LiteralPath $uninstallSource -Destination $uninstallScript -Force
 
+# The shim text must stay pure ASCII: the user's profile path can contain
+# Vietnamese characters, and Set-Content -Encoding Ascii would replace every one
+# of them with "?" if we embedded the expanded path here. Let cmd.exe expand
+# %APPDATA% at run time instead.
 $uninstallShim = @"
 @echo off
-start "" powershell -NoProfile -ExecutionPolicy Bypass -File "$uninstallScript"
+start "" /D "%TEMP%" powershell -NoProfile -ExecutionPolicy Bypass -File "%APPDATA%\OneCast\uninstall.ps1"
 exit
 "@
 Set-Content -LiteralPath (Join-Path $target 'uninstall.cmd') -Value $uninstallShim -Encoding Ascii
