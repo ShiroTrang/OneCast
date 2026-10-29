@@ -196,6 +196,8 @@ bool WasapiOutputDevice::start (const juce::String& deviceId, RingBuffer& inputB
     lateEventCount.store (0, std::memory_order_relaxed);
     bufferErrorCount.store (0, std::memory_order_relaxed);
     starvedEventCount.store (0, std::memory_order_relaxed);
+    riskyGapCount.store (0, std::memory_order_relaxed);
+    maxRiskyGapMs.store (0.0, std::memory_order_relaxed);
     outputPeriodFrames.store (0, std::memory_order_relaxed);
     escalationCount.store (0, std::memory_order_relaxed);
     measuredRingFillFrames.store (0.0, std::memory_order_relaxed);
@@ -264,6 +266,8 @@ void WasapiOutputDevice::stop()
     lateEventCount.store (0, std::memory_order_relaxed);
     bufferErrorCount.store (0, std::memory_order_relaxed);
     starvedEventCount.store (0, std::memory_order_relaxed);
+    riskyGapCount.store (0, std::memory_order_relaxed);
+    maxRiskyGapMs.store (0.0, std::memory_order_relaxed);
     outputPeriodFrames.store (0, std::memory_order_relaxed);
     escalationCount.store (0, std::memory_order_relaxed);
     measuredRingFillFrames.store (0.0, std::memory_order_relaxed);
@@ -416,6 +420,16 @@ int WasapiOutputDevice::getBufferErrorCount() const noexcept
 int WasapiOutputDevice::getStarvedEventCount() const noexcept
 {
     return starvedEventCount.load (std::memory_order_relaxed);
+}
+
+int WasapiOutputDevice::getRiskyGapCount() const noexcept
+{
+    return riskyGapCount.load (std::memory_order_relaxed);
+}
+
+double WasapiOutputDevice::getMaxRiskyGapMs() const noexcept
+{
+    return maxRiskyGapMs.load (std::memory_order_relaxed);
 }
 
 int WasapiOutputDevice::getOutputPeriodFrames() const noexcept
@@ -1063,10 +1077,13 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     // BacklogTarget keeps the block in producer frames and converts it to
     // device frames itself; the target as a whole is then converted back to
     // producer frames here, so the block is not scaled twice.
+    // The endpoint buffer, not just the period, is the largest request a
+    // single event can make: after a stall the render thread is asked to fill
+    // the whole buffer, and the ring must already hold that much.
     BacklogTarget backlog;
     backlog.prepare ((double) deviceSampleRate, periodFrames,
                      producerBlockSize.load (std::memory_order_relaxed),
-                     1.5, 5.0, initialProducerRate);
+                     1.5, 5.0, initialProducerRate, (int) bufferSize);
 
     const int initialTarget = (int) std::lround (backlog.getTargetFrames() * initialRatio);
 
@@ -1096,6 +1113,15 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                       + juce::String (periodMs, 2) + " ms buffer="
                       + juce::String ((int) bufferSize) + " frames ("
                       + juce::String (1000.0 * bufferSize / deviceSampleRate, 2) + " ms)");
+
+    // The engine's real period grid on this machine, so a soak log shows what
+    // the escalation had to choose from. Only rung 2 reports one.
+    if (mode == OutputMode::sharedLowLatency)
+        StartupLog::mark ("output: engine period min=" + juce::String (sharedMinPeriod)
+                          + " fundamental=" + juce::String (sharedFundamental)
+                          + " max=" + juce::String (sharedMaxPeriod)
+                          + " frames, buffer/period="
+                          + juce::String ((double) bufferSize / (double) juce::jmax (1, sharedPeriod), 2));
 
     // ---- Start the stream ----
     hr = audioClient->Start();
@@ -1167,16 +1193,27 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     bool havePreviousEvent = false;
 
     double maxGapMs = 0.0;
+    double biggestRiskyGapMs = 0.0;
     int lateEvents = 0;
+    int riskyGaps = 0;
     int bufferErrors = 0;
 
     // The escalation target: a period in frames, or 0 for the standard shared
-    // rung when the low-latency rung is already at its maximum.
+    // rung when the low-latency rung is already at its maximum. The cause and
+    // the gap are only kept so the log between loops can say why it fired.
+    enum class EscalationCause { starved, riskyGap };
     int escalateToPeriod = 0;
+    EscalationCause escalationCause = EscalationCause::starved;
+    double escalationGapMs = 0.0;
 
-    // Ignore starvation while a freshly started stream primes its endpoint.
-    StarvationWindow starvation;
+    // Ignore events while a freshly started stream primes its endpoint.
+    EscalationWindow starvation;
     starvation.reset (qpcSeconds());
+
+    // Risky wake-up gaps use the same threshold and grace: two stalls the
+    // buffer cannot cover within a minute mean the period is too small.
+    EscalationWindow riskyGapsWindow;
+    riskyGapsWindow.reset (qpcSeconds());
 
     // ---- Re-open helpers (called outside the render loop) ----
     // Everything here may allocate and take a few milliseconds. The loop is
@@ -1229,7 +1266,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
         backlog.prepare ((double) deviceSampleRate, periodFrames,
                          producerBlockSize.load (std::memory_order_relaxed),
-                         1.5, 5.0, currentProducerRate);
+                         1.5, 5.0, currentProducerRate, (int) bufferSize);
 
         const int target = (int) std::lround (backlog.getTargetFrames() * ratio);
 
@@ -1253,6 +1290,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         havePreviousEvent = false;
         eventsSeen = 0;
         starvation.reset (qpcSeconds());
+        riskyGapsWindow.reset (qpcSeconds());
 
         hr = audioClient->Start();
         if (FAILED (hr))
@@ -1422,6 +1460,14 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     {
         const double lateThresholdMs = 2.0 * periodMs;
 
+        // The buffer duration, not the period, decides whether a wake-up was
+        // audible: a 15 ms stall on a 5.8 ms endpoint buffer glitches the
+        // cable even though the next event still finds some padding. Keep
+        // half a millisecond of margin for an event that arrives just as the
+        // buffer runs dry.
+        const double coverMs = juce::jmax (0.0, 1000.0 * (double) bufferSize
+                                                  / (double) deviceSampleRate - 0.5);
+
         // Liveness. A stream can keep running=true while nothing reaches the
         // cable: the events stop, or every GetCurrentPadding/GetBuffer fails.
         // Both are published as "stream stalled" after half a second so the
@@ -1458,12 +1504,19 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                 LARGE_INTEGER eventQpc {};
                 QueryPerformanceCounter (&eventQpc);
 
-                lastRenderEventSeconds = qpcSeconds();
+                // One timestamp for the liveness check and both escalation
+                // windows: a second QPC read would make the two disagree.
+                const double eventSeconds = qpcFrequency.QuadPart > 0
+                                              ? (double) eventQpc.QuadPart
+                                                  / (double) qpcFrequency.QuadPart
+                                              : 0.0;
+                lastRenderEventSeconds = eventSeconds;
 
                 // A late event is not evidence of the steady request: it can
                 // ask for a whole buffer after a stall. Feeding that to the
                 // backlog would raise the target for the rest of the session.
                 bool eventLate = false;
+                bool riskyGapTriggered = false;
 
                 // The first event only starts the clock: there is no previous
                 // render event to measure a gap against, and the interval since
@@ -1485,6 +1538,26 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                     {
                         eventLate = true;
                         lateEventCount.store (++lateEvents, std::memory_order_relaxed);
+                    }
+
+                    // A risky gap is counted even when the endpoint still has
+                    // padding afterwards: the cable already played silence for
+                    // the part of the gap the buffer could not hold. Only the
+                    // low-latency stream can escalate, so the window is fed
+                    // only there; the counters stay honest for every mode.
+                    if (gapMs > coverMs)
+                    {
+                        riskyGapCount.store (++riskyGaps, std::memory_order_relaxed);
+
+                        if (gapMs > biggestRiskyGapMs)
+                        {
+                            biggestRiskyGapMs = gapMs;
+                            maxRiskyGapMs.store (biggestRiskyGapMs,
+                                                 std::memory_order_relaxed);
+                        }
+
+                        if (mode == OutputMode::sharedLowLatency)
+                            riskyGapTriggered = riskyGapsWindow.record (eventSeconds, gapMs);
                     }
                 }
                 else
@@ -1516,6 +1589,11 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
                 bufferFailureSinceSeconds = -1.0;
 
+                // The current stream's buffer/period ratio is what turns a
+                // wake-up gap into the period that would have covered it.
+                const double bufferToPeriodRatio =
+                    (double) bufferSize / (double) juce::jmax (1, sharedPeriod);
+
                 // An empty endpoint at a render event means it played everything
                 // it had since the last one. This is the glitch signal: the
                 // late-event counter misses a gap that still left a little
@@ -1525,18 +1603,32 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                     starvedEventCount.fetch_add (1, std::memory_order_relaxed);
 
                     if (mode == OutputMode::sharedLowLatency
-                        && starvation.record (qpcSeconds()))
+                        && starvation.record (eventSeconds))
                     {
-                        const int next = PeriodPolicy::nextLarger (sharedPeriod,
-                                                                   sharedMinPeriod,
-                                                                   sharedFundamental,
-                                                                   sharedMaxPeriod);
-
-                        // nextLarger returns the current period at the maximum, so
-                        // that is the point to leave the low-latency rung.
-                        escalateToPeriod = next > sharedPeriod ? next : 0;
+                        // No gap evidence here: one period step is the old
+                        // starvation rule, and 0 at the maximum period means
+                        // the standard shared rung.
+                        escalateToPeriod = PeriodPolicy::escalationTarget (
+                            0.0, (double) deviceSampleRate, bufferToPeriodRatio,
+                            sharedPeriod, sharedMinPeriod, sharedFundamental,
+                            sharedMaxPeriod);
+                        escalationCause = EscalationCause::starved;
+                        escalationGapMs = 0.0;
                         return LoopExit::escalate;
                     }
+                }
+
+                // Two stalls the buffer could not cover: pick the period from
+                // the largest of them so the next launch and the rest of this
+                // session stop glitching on the same length of stall.
+                if (riskyGapTriggered)
+                {
+                    escalationGapMs = riskyGapsWindow.largestWithin (eventSeconds);
+                    escalateToPeriod = PeriodPolicy::escalationTarget (
+                        escalationGapMs, (double) deviceSampleRate, bufferToPeriodRatio,
+                        sharedPeriod, sharedMinPeriod, sharedFundamental, sharedMaxPeriod);
+                    escalationCause = EscalationCause::riskyGap;
+                    return LoopExit::escalate;
                 }
 
                 // Exclusive mode is opened at exactly the endpoint buffer
@@ -1689,17 +1781,11 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         escalationCount.fetch_add (1, std::memory_order_relaxed);
 
         const int oldPeriod = sharedPeriod;
-
-        // After leaving the loop and before re-entering it: the only place an
-        // escalation may touch the log.
-        StartupLog::mark ("output: starved, period " + juce::String (oldPeriod)
-                          + " -> "
-                          + (escalateToPeriod > 0
-                               ? juce::String (escalateToPeriod) + " frames"
-                               : juce::String ("standard shared rung"))
-                          + " (starved="
-                          + juce::String (starvedEventCount.load (std::memory_order_relaxed))
-                          + ")");
+        const int oldBufferFrames = (int) bufferSize;
+        const double oldPeriodMs = periodMs;
+        const double oldBufferMs = 1000.0 * (double) oldBufferFrames / deviceSampleRate;
+        const bool byRiskyGap = escalationCause == EscalationCause::riskyGap;
+        const double triggerGapMs = escalationGapMs;
 
         // A larger low-latency period first. If even that cannot be opened,
         // the standard shared rung is still better than no audio at all, and
@@ -1719,11 +1805,25 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
             break;
         }
 
-        StartupLog::mark ("output: reopened mode=" + juce::String (modeName (mode))
-                          + " period=" + juce::String (periodMs, 2) + " ms buffer="
-                          + juce::String ((int) bufferSize) + " frames ("
-                          + juce::String (1000.0 * bufferSize / deviceSampleRate, 2)
-                          + " ms)");
+        // After leaving the loop and before re-entering it: the only place an
+        // escalation may touch the log. The new buffer matters as much as the
+        // new period, because the buffer duration is what has to cover the
+        // next wake-up.
+        StartupLog::mark (
+            juce::String ("output: escalated (") + (byRiskyGap ? "risky gap" : "starved")
+            + "), period " + juce::String (oldPeriod) + " frames ("
+            + juce::String (oldPeriodMs, 2) + " ms) -> "
+            + (mode == OutputMode::sharedLowLatency
+                 ? juce::String (periodFrames) + " frames ("
+                     + juce::String (periodMs, 2) + " ms)"
+                 : juce::String ("standard shared (")
+                     + juce::String (periodMs, 2) + " ms)")
+            + ", buffer " + juce::String (oldBufferFrames) + " frames ("
+            + juce::String (oldBufferMs, 2) + " ms) -> " + juce::String ((int) bufferSize)
+            + " frames (" + juce::String (1000.0 * bufferSize / deviceSampleRate, 2) + " ms)"
+            + (byRiskyGap ? ", gap " + juce::String (triggerGapMs, 1) + " ms" : juce::String())
+            + " (starved=" + juce::String (starvedEventCount.load (std::memory_order_relaxed))
+            + " risky=" + juce::String (riskyGapCount.load (std::memory_order_relaxed)) + ")");
 
         exitReason = runRenderLoop();
     }

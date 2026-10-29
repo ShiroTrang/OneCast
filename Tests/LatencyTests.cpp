@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -286,6 +287,87 @@ public:
             expectEquals (PeriodPolicy::nextLarger (464, 128, 16, 470), 464);
         }
 
+        beginTest ("period to cover: the smallest grid period that covers the gap");
+        {
+            // Evidence from the 30-minute soak: 17.4 ms wake-up gaps on a
+            // 128-frame period whose 280-frame buffer is 2.19 periods long, at
+            // 48 kHz. required = 17.4 * 1.2 * 48000 / (1000 * 2.19) = 457.6,
+            // so the smallest grid period (128 + k * 16) that holds it is 464.
+            expectEquals (PeriodPolicy::periodToCover (17.4, 48000.0, 2.19,
+                                                       128, 128, 16, 480), 464);
+
+            // The answer comes from the gap, not from one fundamental step:
+            // the same evidence from a larger current period lands on 464 too.
+            expectEquals (PeriodPolicy::periodToCover (17.4, 48000.0, 2.19,
+                                                       160, 128, 16, 480), 464);
+
+            // A gap no period can cover asks for the aligned maximum; the
+            // caller then knows the next trigger must leave the low-latency
+            // rung. A huge gap must not overflow that answer.
+            expectEquals (PeriodPolicy::periodToCover (40.0, 48000.0, 2.19,
+                                                       128, 128, 16, 480), 480);
+            expectEquals (PeriodPolicy::periodToCover (1.0e9, 48000.0, 2.19,
+                                                       128, 128, 16, 480), 480);
+
+            // An unaligned engine maximum is still aligned down before use.
+            expectEquals (PeriodPolicy::periodToCover (17.4, 48000.0, 2.19,
+                                                       128, 128, 16, 470), 464);
+        }
+
+        beginTest ("period to cover: a covered gap still steps up, never down");
+        {
+            // A 1 ms gap needs only 57.6 buffer frames, far below the 128
+            // minimum. The headroom calculation would pick the minimum, but an
+            // escalation must never shrink the period within a session.
+            expectEquals (PeriodPolicy::periodToCover (1.0, 48000.0, 2.19,
+                                                       128, 128, 16, 480), 144);
+            expectEquals (PeriodPolicy::periodToCover (1.0, 48000.0, 2.19,
+                                                       464, 128, 16, 480), 480);
+
+            // At the maximum the answer is the current period itself.
+            expectEquals (PeriodPolicy::periodToCover (1.0, 48000.0, 2.19,
+                                                       480, 128, 16, 480), 480);
+        }
+
+        beginTest ("period to cover: degenerate inputs take the one-step escalation");
+        {
+            // A zero rate, a zero ratio, a non-positive gap or a NaN cannot
+            // justify a period; the old starvation step is the safe answer.
+            expectEquals (PeriodPolicy::periodToCover (17.4, 0.0, 2.19,
+                                                       128, 128, 16, 480), 144);
+            expectEquals (PeriodPolicy::periodToCover (17.4, 48000.0, 0.0,
+                                                       128, 128, 16, 480), 144);
+            expectEquals (PeriodPolicy::periodToCover (-1.0, 48000.0, 2.19,
+                                                       128, 128, 16, 480), 144);
+            expectEquals (PeriodPolicy::periodToCover (0.0, 48000.0, 2.19,
+                                                       128, 128, 16, 480), 144);
+            expectEquals (PeriodPolicy::periodToCover (
+                              std::numeric_limits<double>::quiet_NaN(),
+                              48000.0, 2.19, 128, 128, 16, 480), 144);
+
+            // A zero fundamental leaves the minimum only.
+            expectEquals (PeriodPolicy::periodToCover (17.4, 48000.0, 2.19,
+                                                       128, 128, 0, 480), 128);
+        }
+
+        beginTest ("escalation target: the maximum period falls back to standard shared");
+        {
+            // Below the maximum the target is the covering period.
+            expectEquals (PeriodPolicy::escalationTarget (17.4, 48000.0, 2.19,
+                                                          128, 128, 16, 480), 464);
+
+            // At the maximum, even evidence that needs more returns 0: the
+            // caller leaves the low-latency rung instead of asking for a
+            // period the endpoint would refuse.
+            expectEquals (PeriodPolicy::escalationTarget (40.0, 48000.0, 2.19,
+                                                          480, 128, 16, 480), 0);
+
+            // A gap the current period already covers still gives the next
+            // step, not a fall-back.
+            expectEquals (PeriodPolicy::escalationTarget (1.0, 48000.0, 2.19,
+                                                          128, 128, 16, 480), 144);
+        }
+
         beginTest ("output ceiling: the resampler overshoots, the clamp does not");
         {
             constexpr float ceiling = OutputCeiling::ceiling;
@@ -327,7 +409,7 @@ public:
 
         beginTest ("starvation window: two events within the window escalate");
         {
-            StarvationWindow window;
+            EscalationWindow window;
             window.reset (0.0);
 
             // Nothing during the first second after Start: a fresh endpoint is
@@ -342,7 +424,7 @@ public:
 
         beginTest ("starvation window: events more than a window apart do not");
         {
-            StarvationWindow window;
+            EscalationWindow window;
             window.reset (0.0);
 
             expect (! window.record (100.0));
@@ -355,7 +437,7 @@ public:
 
         beginTest ("starvation window: a long quiet stretch forgets old events");
         {
-            StarvationWindow window;
+            EscalationWindow window;
             window.reset (0.0);
 
             for (int i = 0; i < 20; ++i)
@@ -364,6 +446,40 @@ public:
             // Each event arrives after the previous one left the window.
             expect (! window.record (2000.0));
             expectEquals (window.countWithin (2000.0), 1);
+        }
+
+        beginTest ("risky gap window: two gaps within the window escalate");
+        {
+            EscalationWindow window;
+            window.reset (0.0);
+
+            // A fresh endpoint is priming: gaps during the first second say
+            // nothing about scheduling and are not stored.
+            expect (! window.record (0.2, 17.0));
+            expect (! window.record (0.9, 18.0));
+            expectEquals (window.count(), 0);
+
+            expect (! window.record (2.0, 6.0));
+            expect (window.record (20.0, 12.5));
+
+            // The period comes from the largest gap still inside the window,
+            // not from the event that reached the threshold.
+            expectWithinAbsoluteError (window.largestWithin (20.0), 12.5, 1e-9);
+        }
+
+        beginTest ("risky gap window: gaps more than a window apart do not escalate");
+        {
+            EscalationWindow window;
+            window.reset (0.0);
+
+            expect (! window.record (100.0, 17.0));
+            expect (! window.record (161.0, 11.0), "61 s apart is outside the 60 s window");
+            expect (window.record (162.0, 9.0));
+            expectWithinAbsoluteError (window.largestWithin (162.0), 11.0, 1e-9);
+
+            // By 250 s both stored gaps have left the window, so the largest
+            // in-window magnitude is nothing.
+            expectWithinAbsoluteError (window.largestWithin (250.0), 0.0, 1e-9);
         }
 
         beginTest ("backlog floor");
@@ -378,6 +494,33 @@ public:
                          target.getTargetFrames(), period + margin + block);
 
             expectEquals (target.getTargetFrames(), period + margin + block);
+        }
+
+        beginTest ("backlog covers a whole endpoint buffer request");
+        {
+            // At an escalated low-latency period the endpoint buffer is about
+            // 2.2 periods (403 and 886 frames at 48 kHz, as the soak showed).
+            // A late but still running event asks for the whole buffer: a ring
+            // sized for one period underruns, and the reader turns that into a
+            // 13 ms dropout while it re-primes.
+            constexpr int escalatedPeriod = 403;
+            constexpr int endpointBuffer = 886;
+
+            BacklogTarget target;
+            target.prepare (rate, escalatedPeriod, block, 1.5, 5.0, rate, endpointBuffer);
+            target.onRequest (escalatedPeriod);
+
+            std::printf ("    [measured] endpoint buffer cover: %d frames for a %d-frame request\n",
+                         target.getTargetFrames(), endpointBuffer);
+
+            expect (target.getTargetFrames() >= endpointBuffer,
+                    "the target must be able to answer a full-buffer request");
+
+            // A long quiet stretch must not shrink it back below the buffer.
+            for (int i = 0; i < 4000; ++i)
+                target.onRequest (escalatedPeriod);
+
+            expect (target.getTargetFrames() >= endpointBuffer);
         }
 
         beginTest ("no allocation");

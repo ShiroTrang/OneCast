@@ -676,6 +676,8 @@ juce::String AudioEngine::describeLatency() const
          + " late=" + juce::String (output_.getLateEventCount())
          + " maxGap=" + juce::String (output_.getMaxRenderGapMs(), 1) + " ms"
          + " starved=" + juce::String (output_.getStarvedEventCount())
+         + " risky=" + juce::String (output_.getRiskyGapCount())
+         + " riskyMax=" + juce::String (output_.getMaxRiskyGapMs(), 1) + " ms"
          + " resync=" + juce::String (output_.getResyncCount())
          + " underrun=" + juce::String (output_.getUnderrunCount())
          + " bufErr=" + juce::String (output_.getBufferErrorCount());
