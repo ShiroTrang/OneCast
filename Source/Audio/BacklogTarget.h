@@ -12,7 +12,9 @@
 /// The target is expressed in device frames and is what the drift-compensated
 /// reader holds in the ring (converted to producer frames by the caller). It
 /// never falls below one device period, so a stream cannot be asked to keep
-/// less than the endpoint consumes in one event.
+/// less than the endpoint consumes in one event. A late event's whole-buffer
+/// request is answered by releasing only what the ring produced, not by
+/// holding a whole buffer upstream (see RenderFill).
 class BacklogTarget
 {
 public:
@@ -51,8 +53,8 @@ public:
         dropPerEvent = (double) period / eventsPerSecond;
         dropBudget   = dropPerEvent;
 
-        // Start with a full window of the floor request. onRequest() then
-        // overwrites the oldest entry, so a burst leaves after the window.
+        // Start with a full window of one period. onRequest() then overwrites
+        // the oldest entry, so a burst leaves after the window.
         history.fill (period);
         writeIndex = 0;
         windowMax  = period;

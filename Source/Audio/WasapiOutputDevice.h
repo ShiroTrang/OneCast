@@ -89,6 +89,12 @@ public:
     /** Resyncs (large backlog drops) done by the drift-compensated reader. */
     int getResyncCount() const noexcept;
 
+    /** Render events at which the ring could not supply the whole free space
+        and only the frames it produced were released. A short read by itself
+        is repaired by the endpoint padding, not an underrun; a rising count
+        means the ring is being asked for more than it holds. */
+    int getShortReadCount() const noexcept;
+
     /** Longest interval between consecutive render events since the stream
         opened, in milliseconds, measured with QueryPerformanceCounter. */
     double getMaxRenderGapMs() const noexcept;
@@ -105,6 +111,17 @@ public:
         the buffer. */
     int getStarvedEventCount() const noexcept;
 
+    /** Render events whose interval was longer than the endpoint buffer can
+        cover (buffer duration minus half a millisecond). The endpoint never
+        reads as starved afterwards, yet the cable glitched: a system stall
+        longer than the buffer is audible even when the next event still finds
+        padding. Together with the starved count this drives the period. */
+    int getRiskyGapCount() const noexcept;
+
+    /** The largest risky render gap since the stream opened, in milliseconds.
+        0 while no risky gap has been seen. */
+    double getMaxRiskyGapMs() const noexcept;
+
     /** The period hint to persist for the next run, in frames: the
         IAudioClient3 period currently in use (it changes when the render
         thread escalates), standardSharedPeriodHint (-1) when the stream is on
@@ -112,7 +129,8 @@ public:
     int getOutputPeriodFrames() const noexcept;
 
     /** Times the render thread left its loop to raise the period (or to fall
-        back to the standard shared rung) because the endpoint starved. */
+        back to the standard shared rung) because the endpoint starved or a
+        wake-up gap outran what the endpoint buffer could cover. */
     int getEscalationCount() const noexcept;
 
     /** Whether the render thread got an MMCSS ("Pro Audio" or "Audio")
@@ -176,6 +194,7 @@ private:
     std::atomic<int>    outputMode { (int) OutputMode::shared };
     std::atomic<int>    underrunCount { 0 };
     std::atomic<int>    resyncCount { 0 };
+    std::atomic<int>    shortReadCount { 0 };
 
     // Render-deadline diagnostics, published by the render thread. A late
     // event or a buffer error is counted, never logged: the loop may not touch
@@ -188,6 +207,14 @@ private:
     // played everything it had. A thread that woke up too late produces this,
     // so it drives the adaptive period.
     std::atomic<int>    starvedEventCount { 0 };
+
+    // A wake-up longer than the endpoint buffer's duration: the endpoint may
+    // still hold padding when the event arrives, so starvedEventCount misses
+    // it, but the cable has already glitched. The largest gap is the evidence
+    // the escalation picks its period from.
+    std::atomic<int>    riskyGapCount { 0 };
+    std::atomic<double> maxRiskyGapMs { 0.0 };
+
     std::atomic<int>    outputPeriodFrames { 0 };
     std::atomic<int>    escalationCount { 0 };
 
