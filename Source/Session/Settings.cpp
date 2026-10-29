@@ -5,6 +5,7 @@
 #include <cfloat>
 #include <charconv>
 #include <cmath>
+#include <limits>
 #include <system_error>
 
 namespace
@@ -54,6 +55,24 @@ namespace
             return fallback;
 
         return static_cast<float> (std::clamp (d, -static_cast<double> (FLT_MAX), static_cast<double> (FLT_MAX)));
+    }
+
+    /// A non-negative whole number, or `fallback`. JSON has one number type,
+    /// but a hand-edited file may hold a string or an overflow; neither may
+    /// become a nonsensical period.
+    int readNonNegativeInt (const juce::var& object, const char* key, int fallback)
+    {
+        const auto v = object.getProperty (key, {});
+
+        if (! isNumber (v))
+            return fallback;
+
+        const auto d = static_cast<double> (v);
+
+        if (! std::isfinite (d) || d < 0.0 || d > (double) std::numeric_limits<int>::max())
+            return fallback;
+
+        return (int) d;
     }
 
     bool readBool (const juce::var& object, const char* key, bool fallback)
@@ -199,6 +218,7 @@ juce::var toVar (const AppSettings& settings)
     o->setProperty ("startWithWindows", settings.startWithWindows);
     o->setProperty ("startMinimized",   settings.startMinimized);
     o->setProperty ("muteHotkey",       settings.muteHotkey);
+    o->setProperty ("outputPeriodHintFrames", settings.outputPeriodHintFrames);
     o->setProperty ("params",           paramsToVar (settings.params));
 
     return juce::var (o);
@@ -220,6 +240,8 @@ AppSettings fromVar (const juce::var& v)
     s.startWithWindows = readBool   (v, "startWithWindows", s.startWithWindows);
     s.startMinimized   = readBool   (v, "startMinimized",   s.startMinimized);
     s.muteHotkey       = readString (v, "muteHotkey",       s.muteHotkey);
+    s.outputPeriodHintFrames = readNonNegativeInt (v, "outputPeriodHintFrames",
+                                                   s.outputPeriodHintFrames);
     s.params           = paramsFromVar (v.getProperty ("params", {}));
 
     return s;

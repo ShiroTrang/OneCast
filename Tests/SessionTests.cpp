@@ -99,6 +99,7 @@ namespace
         s.startWithWindows = true;
         s.startMinimized   = true;
         s.muteHotkey       = "Ctrl+Shift+F9";
+        s.outputPeriodHintFrames = 144;
         return s;
     }
 
@@ -272,6 +273,7 @@ public:
             expect (original.startWithWindows != defaults.startWithWindows);
             expect (original.startMinimized != defaults.startMinimized);
             expect (original.muteHotkey != defaults.muteHotkey);
+            expect (original.outputPeriodHintFrames != defaults.outputPeriodHintFrames);
 
             const auto text = JsonFile::toText (SettingsIO::toVar (original));
             const auto back = SettingsIO::fromVar (juce::JSON::parse (text));
@@ -284,6 +286,7 @@ public:
             expect (back.startWithWindows);
             expect (back.startMinimized);
             expectEquals (back.muteHotkey, original.muteHotkey);
+            expectEquals (back.outputPeriodHintFrames, original.outputPeriodHintFrames);
 
             expect (back.params.bypass == false && back.params.mute == false,
                     "bypass and mute always come back off");
@@ -334,6 +337,16 @@ public:
 
             // An explicitly empty hotkey means "none", not "use the default".
             expectEquals (SettingsIO::fromVar (juce::JSON::parse (R"({"muteHotkey": ""})")).muteHotkey, juce::String());
+
+            // The output period hint is a frame count: no hint is 0, and a
+            // negative or non-numeric value is the same as no hint.
+            expectEquals (SettingsIO::fromVar (juce::JSON::parse ("{}")).outputPeriodHintFrames, 0);
+            expectEquals (SettingsIO::fromVar (juce::JSON::parse (R"({"outputPeriodHintFrames": -7})"))
+                            .outputPeriodHintFrames, 0);
+            expectEquals (SettingsIO::fromVar (juce::JSON::parse (R"({"outputPeriodHintFrames": "144"})"))
+                            .outputPeriodHintFrames, 0);
+            expectEquals (SettingsIO::fromVar (juce::JSON::parse (R"({"outputPeriodHintFrames": 1e308})"))
+                            .outputPeriodHintFrames, 0);
 
             ScopedTempDir tmp;
             const auto file = tmp.dir.getChildFile ("settings.json");
