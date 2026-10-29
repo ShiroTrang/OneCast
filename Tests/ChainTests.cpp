@@ -10,6 +10,7 @@
 #include "TestSignals.h"
 
 #include "../Source/Dsp/VoiceChain.h"
+#include "../Source/Dsp/NoiseSuppressor.h"
 #include "../Source/Dsp/RnnoiseDenoiser.h"
 #include "../Source/Dsp/SpectralDenoiser.h"
 
@@ -342,6 +343,43 @@ public:
                 mutedWorst = std::max (mutedWorst, std::abs (changed[(size_t) i]));
 
             expect (mutedWorst < 1.0e-4f, "mute left " + juce::String (mutedWorst));
+        }
+
+        beginTest ("a cancelled mode switch leaves no queued mode");
+        {
+            constexpr double sr = 48000.0;
+
+            SpectralDenoiser light;
+            light.prepare (sr, 128);
+            const int lightLatency = light.getLatencySamples();
+
+            NoiseSuppressor suppressor;
+            suppressor.prepare (sr, 128);
+
+            std::vector<float> block (128, 0.0f);
+
+            suppressor.setMode (NoiseMode::off);   // the first mode snaps
+            suppressor.process (block.data(), (int) block.size());
+
+            // off -> light starts a crossfade, AI is queued behind it, and
+            // light is requested again. Light is already the target, so the
+            // newest request wins and the stale AI queue has to be dropped.
+            suppressor.setMode (NoiseMode::light);
+            suppressor.setMode (NoiseMode::ai);
+            suppressor.setMode (NoiseMode::light);
+
+            // Longer than the light prime, the 20 ms crossfade and the prime
+            // plus crossfade AI would need: a stale switch would have settled
+            // in AI by the end of this.
+            for (int i = 0; i < 64; ++i)
+                suppressor.process (block.data(), (int) block.size());
+
+            report ("latency after cancelling the queued mode: "
+                    + juce::String (suppressor.getLatencySamples()) + " samples");
+            expectEquals (suppressor.getLatencySamples(), lightLatency,
+                          "the cancelled AI switch fired later");
+            expect (suppressor.getSpeechProbability() < 0.0f,
+                    "AI became the heard mode after it was cancelled");
         }
 
         beginTest ("block-size independence");

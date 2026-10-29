@@ -24,9 +24,8 @@ BottomBar::BottomBar (MainComponent& owner)
 
         if (settings.params.mute != wantMuted)
         {
-            // The live switches are not part of a preset any more than pre-gain
-            // is, but editing them still means the sound moved away from it.
-            settings.presetName.clear();
+            // Mute is not part of a preset (Settings never stores it), so
+            // muting must not make the combo claim the sound left the preset.
             main.setMuted (wantMuted);
         }
 

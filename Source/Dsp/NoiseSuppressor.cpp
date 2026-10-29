@@ -66,7 +66,13 @@ void NoiseSuppressor::setMode (NoiseMode mode) noexcept
     if (switching_)
     {
         if (mode == targetMode_)
+        {
+            // The newest request is the mode already being faded to: it also
+            // supersedes any older queued request. Keeping that queue would
+            // start a switch the UI no longer shows once this fade ends.
+            hasPending_ = false;
             return;
+        }
 
         pendingMode_ = mode;
         hasPending_ = true;
