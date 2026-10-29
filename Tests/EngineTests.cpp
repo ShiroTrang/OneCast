@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <memory>
+#include <utility>
 #include <vector>
 
 namespace
@@ -60,13 +62,15 @@ namespace
         return chain.getLatencySamples();
     }
 
-    /// An AudioIODevice with configurable input channels, 48 kHz, 128-sample
-    /// blocks and 100 samples of input latency. No hardware is touched.
+    /// An AudioIODevice with configurable name, type and input channels,
+    /// 48 kHz, 128-sample blocks and 100 samples of input latency. No hardware
+    /// is touched.
     class FakeInputDevice final : public juce::AudioIODevice
     {
     public:
-        explicit FakeInputDevice (int numChannels)
-            : juce::AudioIODevice ("Fake microphone", "Fake"),
+        explicit FakeInputDevice (int numChannels, juce::String name = "Fake microphone",
+                                  juce::String typeName = "Fake")
+            : juce::AudioIODevice (std::move (name), std::move (typeName)),
               channels_ (numChannels)
         {
         }
@@ -119,6 +123,40 @@ namespace
     private:
         int channels_ = 1;
         bool open_ = true;
+    };
+
+    /// A device type that only creates FakeInputDevice objects. Adding it to an
+    /// engine's manager lets a test "choose Mic A" through the real
+    /// AudioDeviceManager without opening any hardware.
+    class FakeDeviceType final : public juce::AudioIODeviceType
+    {
+    public:
+        explicit FakeDeviceType (juce::StringArray inputs)
+            : juce::AudioIODeviceType ("Fake"), inputs_ (std::move (inputs))
+        {
+        }
+
+        void scanForDevices() override {}
+        juce::StringArray getDeviceNames (bool wantInputNames) const override
+        {
+            return wantInputNames ? inputs_ : juce::StringArray();
+        }
+
+        int getDefaultDeviceIndex (bool) const override { return 0; }
+        int getIndexOfDevice (juce::AudioIODevice*, bool) const override { return -1; }
+        bool hasSeparateInputsAndOutputs() const override { return true; }
+
+        juce::AudioIODevice* createDevice (const juce::String& outputDeviceName,
+                                           const juce::String& inputDeviceName) override
+        {
+            if (inputDeviceName.isEmpty() || outputDeviceName.isNotEmpty())
+                return nullptr;
+
+            return new FakeInputDevice (2, inputDeviceName, getTypeName());
+        }
+
+    private:
+        juce::StringArray inputs_;
     };
 
     /// Feeds `numSamples` from up to two deinterleaved input channels through
@@ -188,6 +226,25 @@ public:
             otherAsio.add ("Generic ASIO");
             expectEquals (AudioEngine::pickFirstRunAsioDevice (otherAsio), juce::String());
             expectEquals (AudioEngine::pickFirstRunAsioDevice ({}), juce::String());
+        }
+
+        beginTest ("explicit ASIO pick falls back to the first driver");
+        {
+            // The M-Track still wins when it is installed.
+            juce::StringArray asio;
+            asio.add ("Generic ASIO");
+            asio.add ("M-Audio M-Track Solo and Duo ASIO");
+            expectEquals (AudioEngine::pickAsioDevice (asio),
+                          juce::String ("M-Audio M-Track Solo and Duo ASIO"));
+
+            // Without it, an explicit ASIO choice opens one of the installed
+            // drivers instead of failing; first run keeps requiring the M-Track.
+            juce::StringArray otherAsio;
+            otherAsio.add ("Generic ASIO");
+            otherAsio.add ("Voicemeeter ASIO");
+            expectEquals (AudioEngine::pickAsioDevice (otherAsio), juce::String ("Generic ASIO"));
+            expectEquals (AudioEngine::pickFirstRunAsioDevice (otherAsio), juce::String());
+            expectEquals (AudioEngine::pickAsioDevice ({}), juce::String());
         }
 
         beginTest ("WASAPI pick avoids the cable");
@@ -304,6 +361,81 @@ public:
             expectEquals (engine.getOutputDeviceId(), juce::String ("{bogus-id}"));
             expect (! engine.isOutputRunning());
             expect (engine.hasOutputError());
+        }
+
+        beginTest ("a replaced input is never prepared");
+        {
+            // JUCE's own audioDeviceListChanged() closes a vanished input and
+            // opens the Windows default in its place, which may be another mic
+            // or even CABLE Output. The engine has to refuse that device and
+            // tell the message thread to put the chosen mic back.
+            const auto params = modulesOff();
+            const auto sine = TestSignals::sine (48000.0, 440.0, 0.25f, 512);
+            const auto silence = std::vector<float> (512, 0.0f);
+
+            const auto openMicA = [&params] (AudioEngine& engine)
+            {
+                engine.setParams (params);
+                engine.getDeviceManager().addAudioDeviceType (
+                    std::make_unique<FakeDeviceType> (juce::StringArray { "Mic A" }));
+                return engine.setApi ("Fake");
+            };
+
+            // A different microphone.
+            {
+                AudioEngine engine;
+                expect (openMicA (engine), "the fake API did not open: "
+                                           + engine.getLastDeviceError());
+
+                FakeInputDevice replacement (2, "Mic B", "Fake");
+                engine.audioDeviceAboutToStart (&replacement);
+
+                feed (engine, 2, sine.data(), silence.data(), (int) sine.size());
+
+                int framesRead = -1;
+                drain (engine, (int) sine.size(), framesRead);
+                expectEquals (framesRead, 0, "the replacement device reached the ring");
+
+                expect (engine.takeUnexpectedDeviceFlag(), "the replacement was not flagged");
+                expect (! engine.takeUnexpectedDeviceFlag(), "the flag was raised twice");
+            }
+
+            // A virtual cable output, which is never a microphone.
+            {
+                AudioEngine engine;
+                expect (openMicA (engine), "the fake API did not open: "
+                                           + engine.getLastDeviceError());
+
+                FakeInputDevice cable (2, "CABLE Output (VB-Audio Virtual Cable)", "Fake");
+                engine.audioDeviceAboutToStart (&cable);
+
+                feed (engine, 2, sine.data(), silence.data(), (int) sine.size());
+
+                int framesRead = -1;
+                drain (engine, (int) sine.size(), framesRead);
+                expectEquals (framesRead, 0, "a cable output reached the ring");
+
+                expect (engine.takeUnexpectedDeviceFlag(), "the cable output was not flagged");
+                expect (! engine.takeUnexpectedDeviceFlag(), "the flag was raised twice");
+            }
+
+            // The chosen mic itself still prepares and reaches the ring, so
+            // the refusal above is not simply "nothing ever prepares".
+            {
+                AudioEngine engine;
+                expect (openMicA (engine), "the fake API did not open: "
+                                           + engine.getLastDeviceError());
+
+                FakeInputDevice chosen (2, "Mic A", "Fake");
+                engine.audioDeviceAboutToStart (&chosen);
+
+                feed (engine, 2, sine.data(), silence.data(), (int) sine.size());
+
+                int framesRead = -1;
+                drain (engine, (int) sine.size(), framesRead);
+                expectEquals (framesRead, (int) sine.size(), "the chosen mic did not reach the ring");
+                expect (! engine.takeUnexpectedDeviceFlag(), "the chosen mic was flagged");
+            }
         }
 
         beginTest ("channel selection");

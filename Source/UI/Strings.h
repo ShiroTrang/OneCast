@@ -66,6 +66,11 @@ namespace Strings
     inline juce::String bannerNoCable()    { return juce::String (juce::CharPointer_UTF8 ("Không tìm thấy CABLE Input. Cài VB-Audio Virtual Cable (vb-audio.com/Cable) rồi mở lại OneCast, hoặc chọn thiết bị đầu ra khác.")); }
     inline juce::String bannerInputLost()  { return juce::String (juce::CharPointer_UTF8 ("Mất kết nối với \"%1\". OneCast sẽ tự kết nối lại khi thiết bị được cắm lại.")); }
     inline juce::String bannerOpenFailed() { return juce::String (juce::CharPointer_UTF8 ("Không mở được \"%1\": %2. Có thể app khác (ví dụ LiveVocal) đang dùng driver này.")); }
+    // The engine's English detail goes to the start-up log; the banner gives
+    // the user one of these three short reasons instead.
+    inline juce::String errorDeviceBusy()  { return juce::String (juce::CharPointer_UTF8 ("thiết bị đang được app khác dùng")); }
+    inline juce::String errorNotFound()    { return juce::String (juce::CharPointer_UTF8 ("không tìm thấy thiết bị")); }
+    inline juce::String errorUnknown()     { return juce::String (juce::CharPointer_UTF8 ("lỗi không xác định")); }
     inline juce::String bannerOutputLost() { return juce::String (juce::CharPointer_UTF8 ("Mất kết nối với đầu ra \"%1\". Đang chờ thiết bị quay lại.")); }
     inline juce::String bannerInputClip()  { return juce::String (juce::CharPointer_UTF8 ("Mic vào quá to (bị vỡ ngay ở phần cứng). Vặn nhỏ gain trên M-Track.")); }
     inline juce::String dismiss()          { return juce::String (juce::CharPointer_UTF8 ("Đóng")); }

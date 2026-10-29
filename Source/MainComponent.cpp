@@ -23,6 +23,24 @@ namespace
 
         return {};
     }
+
+    /// The engine keeps the driver's English wording for the start-up log.
+    /// The banner shows one short Vietnamese reason: users cannot tell "No
+    /// such device" from "Couldn't open the input device!" and it is not
+    /// translated anywhere.
+    juce::String deviceErrorText (const juce::String& detail)
+    {
+        const auto lower = detail.toLowerCase();
+
+        if (lower.contains ("exclusive") || lower.contains ("in use")
+            || lower.contains ("busy") || lower.contains ("being used"))
+            return Strings::errorDeviceBusy();
+
+        if (lower.contains ("no such device") || lower.contains ("not found"))
+            return Strings::errorNotFound();
+
+        return Strings::errorUnknown();
+    }
 }
 
 //==============================================================================
@@ -122,7 +140,7 @@ MainComponent::MainComponent()
             showBanner (BannerKind::openFailed,
                         Strings::bannerOpenFailed()
                             .replace ("%1", name)
-                            .replace ("%2", engine.getLastDeviceError()),
+                            .replace ("%2", deviceErrorText (engine.getLastDeviceError())),
                         AlertBanner::Severity::Critical);
             logDeviceEvent ("device failed to open at start: \"" + name + "\" ("
                             + engine.getLastDeviceError() + ")");
@@ -385,7 +403,59 @@ void MainComponent::timerCallback()
         chooseOutputDevice (! outputConfigured);
     }
 
+    // JUCE can open a replacement device without telling us; the engine flags
+    // it so the recovery can put the user's microphone back.
+    handleUnexpectedDevice();
+
     watchAudioDevice();
+}
+
+void MainComponent::handleUnexpectedDevice()
+{
+    if (! engine.takeUnexpectedDeviceFlag())
+        return;
+
+    // Capture the choice before closeLostDevice() forgets it; the manager's
+    // current device is the replacement, not what the user picked.
+    auto recorded = engine.getRecordedChoiceState();
+
+    if (recorded == nullptr)
+        recorded = parseSavedDeviceState();
+
+    {
+        // Closing and reopening are device operations like any other: keep the
+        // timer's device watch from running in the middle of one.
+        const juce::ScopedValueSetter<bool> busy (deviceBusy, true);
+        engine.closeLostDevice();
+    }
+
+    lostDeviceState = std::move (recorded);
+
+    if (lostDeviceState == nullptr)
+    {
+        deviceRecovery.watchNewDevice();
+        showBanner (BannerKind::openFailed,
+                    Strings::bannerOpenFailed()
+                        .replace ("%1", currentInputName())
+                        .replace ("%2", Strings::errorUnknown()),
+                    AlertBanner::Severity::Critical);
+        logDeviceEvent ("unexpected input device; no earlier choice to reopen");
+        syncDevicePanelFromEngine();
+        return;
+    }
+
+    // The device is away until the reopen succeeds: the same wait a replug
+    // starts, including the settle time for endpoint notifications.
+    deviceRecovery.deviceLost (juce::Time::getMillisecondCounterHiRes());
+
+    const auto name = inputNameFromState (*lostDeviceState);
+
+    logDeviceEvent ("unexpected input device; reopening \"" + name + "\"");
+    showBanner (BannerKind::inputLost,
+                Strings::bannerInputLost().replace ("%1", name),
+                AlertBanner::Severity::Critical);
+
+    syncDevicePanelFromEngine();
 }
 
 void MainComponent::watchAudioDevice()
@@ -427,10 +497,14 @@ void MainComponent::audioApiChanged (const juce::String& typeName)
 
     if (! applied)
     {
+        // The banner says one short Vietnamese reason; the driver's own text
+        // is only useful in the start-up log.
+        logDeviceEvent ("api change failed: \"" + typeName + "\" ("
+                        + engine.getLastDeviceError() + ")");
         showBanner (BannerKind::openFailed,
                     Strings::bannerOpenFailed()
                         .replace ("%1", currentInputName())
-                        .replace ("%2", engine.getLastDeviceError()),
+                        .replace ("%2", deviceErrorText (engine.getLastDeviceError())),
                     AlertBanner::Severity::Critical);
         syncDevicePanelFromEngine();
         return;
@@ -470,10 +544,12 @@ void MainComponent::inputDeviceChanged (const juce::String& name)
 
     if (! applied)
     {
+        logDeviceEvent ("input change failed: \"" + name + "\" ("
+                        + engine.getLastDeviceError() + ")");
         showBanner (BannerKind::openFailed,
                     Strings::bannerOpenFailed()
                         .replace ("%1", name)
-                        .replace ("%2", engine.getLastDeviceError()),
+                        .replace ("%2", deviceErrorText (engine.getLastDeviceError())),
                     AlertBanner::Severity::Critical);
         syncDevicePanelFromEngine();
         return;
@@ -521,10 +597,12 @@ void MainComponent::bufferSizeChanged (int samples)
 
     if (! applied)
     {
+        logDeviceEvent ("buffer size change failed: " + juce::String (samples) + " ("
+                        + engine.getLastDeviceError() + ")");
         showBanner (BannerKind::openFailed,
                     Strings::bannerOpenFailed()
                         .replace ("%1", currentInputName())
-                        .replace ("%2", engine.getLastDeviceError()),
+                        .replace ("%2", deviceErrorText (engine.getLastDeviceError())),
                     AlertBanner::Severity::Critical);
         syncDevicePanelFromEngine();
         return;
@@ -853,9 +931,10 @@ void MainComponent::audioDeviceLost (bool closeIt)
         showBanner (BannerKind::openFailed,
                     Strings::bannerOpenFailed()
                         .replace ("%1", currentInputName())
-                        .replace ("%2", engine.getLastDeviceError()),
+                        .replace ("%2", deviceErrorText (engine.getLastDeviceError())),
                     AlertBanner::Severity::Critical);
-        logDeviceEvent ("device lost without a state to reopen");
+        logDeviceEvent ("device lost without a state to reopen ("
+                        + engine.getLastDeviceError() + ")");
         return;
     }
 
@@ -922,7 +1001,7 @@ void MainComponent::tryReopenLostDevice()
         showBanner (BannerKind::openFailed,
                     Strings::bannerOpenFailed()
                         .replace ("%1", name)
-                        .replace ("%2", engine.getLastDeviceError()),
+                        .replace ("%2", deviceErrorText (engine.getLastDeviceError())),
                     AlertBanner::Severity::Critical);
         logDeviceEvent ("reopen failed: \"" + name + "\" (" + engine.getLastDeviceError() + ")");
         return;

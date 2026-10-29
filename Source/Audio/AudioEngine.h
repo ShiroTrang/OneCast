@@ -40,6 +40,11 @@ public:
     /// output is a playback endpoint, never a microphone.
     static juce::StringArray filterInputNames (const juce::StringArray& names);
 
+    /// The ASIO driver an explicit "ASIO" choice opens: the M-Track when it is
+    /// installed, otherwise the first listed driver (there is no system default
+    /// ASIO device, and the user asked for ASIO). "" when none is listed.
+    static juce::String pickAsioDevice (const juce::StringArray& asioNames);
+
     /// The first ASIO driver that looks like the M-Track, or "".
     static juce::String pickFirstRunAsioDevice (const juce::StringArray& asioNames);
 
@@ -121,6 +126,16 @@ public:
     /// True once per raw input sample at or above -0.1 dBFS, then clears.
     bool takeInputClipFlag() noexcept;
 
+    /// True when the device JUCE started is not the input the user chose, or is
+    /// a virtual cable output. The engine leaves the chain unprepared for such
+    /// a device; the message thread closes it and reopens the chosen mic.
+    bool takeUnexpectedDeviceFlag() noexcept;
+
+    /// The input the user last chose explicitly, as a state the recovery code
+    /// can reopen, or nullptr when nothing was chosen. It is read before
+    /// closeLostDevice(), which forgets the choice.
+    std::unique_ptr<juce::XmlElement> getRecordedChoiceState() const;
+
     /// Driver input latency + chain latency + the output latency actually
     /// queued. While no output runs it falls back to the backlog target plus
     /// the device period, which is the best estimate available then.
@@ -157,6 +172,20 @@ public:
     void audioDeviceStopped() override;
 
 private:
+    /// What the user last asked for, message thread only. JUCE's own
+    /// device-list handling can replace a vanished input with the Windows
+    /// default, so the callback compares what started against this.
+    struct DeviceChoice
+    {
+        juce::String typeName, inputName;
+        int bufferSize = 0;
+    };
+
+    void rememberChoice (const juce::String& typeName, const juce::String& inputName,
+                         int bufferSize) noexcept;
+    bool isUnexpectedDevice (const juce::String& typeName,
+                             const juce::String& inputName) const noexcept;
+
     juce::AudioIODeviceType* findDeviceType (const juce::String& name);
     juce::String openChoice (const juce::String& typeName, const juce::String& inputName,
                              int bufferSize);
@@ -191,6 +220,10 @@ private:
 
     std::atomic<float> rawPeakDb_ { -200.0f };
     std::atomic<bool> inputClip_ { false };
+    std::atomic<bool> unexpectedDevice_ { false };
+
+    // Message thread only.
+    DeviceChoice chosen_;
 
     // Audio thread only.
     std::vector<float> mono_;

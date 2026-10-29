@@ -74,6 +74,23 @@ juce::String AudioEngine::pickFirstRunAsioDevice (const juce::StringArray& asioN
     return {};
 }
 
+juce::String AudioEngine::pickAsioDevice (const juce::StringArray& asioNames)
+{
+    const auto mTrack = pickFirstRunAsioDevice (asioNames);
+
+    if (mTrack.isNotEmpty())
+        return mTrack;
+
+    // An explicit ASIO choice must not fail just because the interface is not
+    // an M-Track: there is no system default ASIO driver, so the first one
+    // listed is the closest thing to the driver the user meant.
+    for (const auto& name : asioNames)
+        if (name.isNotEmpty())
+            return name;
+
+    return {};
+}
+
 juce::String AudioEngine::pickWasapiInput (const juce::StringArray& names, int defaultIndex)
 {
     const auto isCable = [] (const juce::String& name)
@@ -151,6 +168,36 @@ std::unique_ptr<juce::XmlElement> AudioEngine::inputOnlyState (const juce::XmlEl
 //  Lifecycle
 // ==================================================================
 
+void AudioEngine::rememberChoice (const juce::String& typeName,
+                                  const juce::String& inputName, int bufferSize) noexcept
+{
+    chosen_.typeName   = typeName;
+    chosen_.inputName  = inputName;
+    chosen_.bufferSize = bufferSize;
+
+    // A new explicit choice supersedes a replacement that was flagged but not
+    // handled yet; otherwise the timer would close the device just opened.
+    unexpectedDevice_.store (false, std::memory_order_release);
+}
+
+bool AudioEngine::isUnexpectedDevice (const juce::String& typeName,
+                                      const juce::String& inputName) const noexcept
+{
+    // A virtual cable output is never a microphone, whatever was recorded.
+    if (inputName.containsIgnoreCase ("CABLE Output"))
+        return true;
+
+    // Nothing chosen yet (an engine opened directly by a test, say): there is
+    // no promise to compare against.
+    if (chosen_.inputName.isEmpty())
+        return false;
+
+    // An old saved state can name the input but not its API. The name is then
+    // the only part of the choice that can be checked.
+    return inputName != chosen_.inputName
+           || (chosen_.typeName.isNotEmpty() && typeName != chosen_.typeName);
+}
+
 void AudioEngine::initialise (const juce::XmlElement* savedDeviceState)
 {
     if (savedDeviceState != nullptr)
@@ -163,14 +210,29 @@ void AudioEngine::initialise (const juce::XmlElement* savedDeviceState)
         // microphone the user did not choose. A saved cable input is blanked
         // by inputOnlyState(), so refuse here instead.
         if (input.isEmpty())
+        {
             lastDeviceError_ = "no input device chosen";
+        }
         else
+        {
+            // Record the choice before opening: JUCE calls
+            // audioDeviceAboutToStart() from inside initialise(), and that
+            // callback has to recognise this device as the chosen one.
+            rememberChoice (state->getStringAttribute ("deviceType"), input,
+                            state->getIntAttribute ("audioDeviceBufferSize", 0));
             lastDeviceError_ = deviceManager.initialise (2, 0, state.get(), false);
+        }
     }
     else
     {
         openFirstRunChoice();
     }
+
+    // A state saved by an older build may leave the API out; the device that
+    // opened tells us what it was, so a later replacement can be recognised.
+    if (lastDeviceError_.isEmpty() && chosen_.typeName.isEmpty())
+        if (auto* chosen = deviceManager.getCurrentAudioDevice())
+            chosen_.typeName = chosen->getTypeName();
 
     if (auto* device = deviceManager.getCurrentAudioDevice())
         StartupLog::mark ("init: opened type=\"" + device->getTypeName()
@@ -229,6 +291,10 @@ juce::String AudioEngine::openChoice (const juce::String& typeName,
         lastDeviceError_ = "no input device chosen";
         return lastDeviceError_;
     }
+
+    // Before initialise(), because it calls audioDeviceAboutToStart() for the
+    // device it opens.
+    rememberChoice (typeName, inputName, bufferSize);
 
     auto state = makeDeviceState (typeName, inputName, bufferSize);
     return deviceManager.initialise (2, 0, state.get(), false);
@@ -292,7 +358,7 @@ bool AudioEngine::setApi (const juce::String& typeName)
 
     type->scanForDevices();
     const auto input = typeName == "ASIO"
-                         ? pickFirstRunAsioDevice (type->getDeviceNames (true))
+                         ? pickAsioDevice (type->getDeviceNames (true))
                          : pickWasapiInput (type->getDeviceNames (true),
                                             type->getDefaultDeviceIndex (true));
 
@@ -344,6 +410,17 @@ bool AudioEngine::setInputDevice (const juce::String& name)
     setup.outputChannels.clear();
     setup.useDefaultOutputChannels = false;
 
+    // Record the choice before the setup is applied: JUCE starts the new
+    // device (and calls us back) from inside setAudioDeviceSetup().
+    const auto previousChoice = chosen_;
+    juce::String typeName = deviceManager.getCurrentAudioDeviceType();
+
+    if (typeName.isEmpty())
+        if (auto* device = deviceManager.getCurrentAudioDevice())
+            typeName = device->getTypeName();
+
+    rememberChoice (typeName, name, setup.bufferSize);
+
     lastDeviceError_ = deviceManager.setAudioDeviceSetup (setup, true);
 
     // JUCE's ASIO wrapper ignores a refused rate and carries on at the old
@@ -365,12 +442,18 @@ bool AudioEngine::setInputDevice (const juce::String& name)
 
         // Do not leave the user without audio because one device refused.
         // Restoring the previous choice is not a silent fallback: the caller
-        // gets false and the error above.
+        // gets false and the error above. The record goes back first, because
+        // the rollback starts the old device and must not look unexpected.
         const auto error = lastDeviceError_;
+        chosen_ = previousChoice;
         deviceManager.setAudioDeviceSetup (previousSetup, true);
         lastDeviceError_ = error;
         return false;
     }
+
+    if (chosen_.typeName.isEmpty())
+        if (auto* device = deviceManager.getCurrentAudioDevice())
+            chosen_.typeName = device->getTypeName();
 
     return true;
 }
@@ -519,6 +602,11 @@ bool AudioEngine::takeInputClipFlag() noexcept
     return inputClip_.exchange (false, std::memory_order_relaxed);
 }
 
+bool AudioEngine::takeUnexpectedDeviceFlag() noexcept
+{
+    return unexpectedDevice_.exchange (false, std::memory_order_acquire);
+}
+
 float AudioEngine::getTotalLatencyMs() const noexcept
 {
     const double sr = sampleRate_.load (std::memory_order_relaxed);
@@ -650,9 +738,22 @@ bool AudioEngine::isDeviceListed (const juce::XmlElement& state)
 
 void AudioEngine::closeLostDevice()
 {
+    // The choice is what a close gives up on; the next explicit open records a
+    // new one. Clearing it here keeps a later spontaneous open from being
+    // mistaken for the mic the user chose.
+    chosen_ = {};
+
     // Stops the device (our callback gets audioDeviceStopped()) and deletes
     // it; for ASIO that unloads the driver.
     deviceManager.closeAudioDevice();
+}
+
+std::unique_ptr<juce::XmlElement> AudioEngine::getRecordedChoiceState() const
+{
+    if (chosen_.inputName.isEmpty())
+        return {};
+
+    return makeDeviceState (chosen_.typeName, chosen_.inputName, chosen_.bufferSize);
 }
 
 bool AudioEngine::reopenDevice (const juce::XmlElement& state)
@@ -666,10 +767,22 @@ bool AudioEngine::reopenDevice (const juce::XmlElement& state)
 
     // Same guard as initialise(): a blank name would ask JUCE for the default
     // microphone, so fail the reopen instead of opening something else.
-    if (clean->getStringAttribute ("audioInputDeviceName").isEmpty())
+    const auto input = clean->getStringAttribute ("audioInputDeviceName");
+
+    if (input.isEmpty())
+    {
         lastDeviceError_ = "no input device chosen";
+    }
     else
+    {
+        rememberChoice (clean->getStringAttribute ("deviceType"), input,
+                        clean->getIntAttribute ("audioDeviceBufferSize", 0));
         lastDeviceError_ = deviceManager.initialise (2, 0, clean.get(), false);
+    }
+
+    if (lastDeviceError_.isEmpty() && chosen_.typeName.isEmpty())
+        if (auto* chosen = deviceManager.getCurrentAudioDevice())
+            chosen_.typeName = chosen->getTypeName();
 
     if (auto* device = deviceManager.getCurrentAudioDevice())
         StartupLog::mark ("reopen: type=\"" + device->getTypeName() + "\" device=\""
@@ -691,6 +804,18 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     if (device == nullptr)
     {
         prepared_.store (false, std::memory_order_release);
+        return;
+    }
+
+    // AudioDeviceManager::audioDeviceListChanged() closes a vanished input and
+    // opens the Windows default in its place. That may be another microphone,
+    // or CABLE Output, which would feed the app its own output. Nothing may
+    // reach the ring from a device the user did not choose: stay unprepared
+    // and let the message thread close it and reopen the recorded mic.
+    if (isUnexpectedDevice (device->getTypeName(), device->getName()))
+    {
+        prepared_.store (false, std::memory_order_release);
+        unexpectedDevice_.store (true, std::memory_order_release);
         return;
     }
 
