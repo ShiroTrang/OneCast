@@ -113,6 +113,11 @@ MainComponent::MainComponent()
     deviceRecovery.setNotificationsAvailable (deviceHotplug.start());
     StartupLog::mark ("ctor: hotplug.start()");
 
+    // Start the cable at the period that stayed glitch-free last run. The
+    // engine may raise it again if this machine still starves; the timer below
+    // saves whatever it settles on.
+    engine.setOutputPeriodHintFrames (settings.outputPeriodHintFrames);
+
     refreshDeviceLists();
     chooseOutputDevice (true);
     StartupLog::mark ("ctor: device lists and output");
@@ -364,6 +369,17 @@ void MainComponent::timerCallback()
     devicePanel.setLatencyMs (engine.getTotalLatencyMs());
     devicePanel.setRunning (engine.isDeviceOpen() && engine.isOutputRunning());
     devicePanel.setChannelCount (activeInputChannels());
+
+    // The render thread may have escalated to a larger period. Remember it
+    // through the normal debounced save, so the next launch starts there
+    // instead of learning the same lesson again.
+    const int outputPeriodFrames = engine.getOutputPeriodFrames();
+
+    if (outputPeriodFrames > 0 && outputPeriodFrames != settings.outputPeriodHintFrames)
+    {
+        settings.outputPeriodHintFrames = outputPeriodFrames;
+        settingsChanged();
+    }
 
     // A raw sample at or above -0.1 dBFS is already clipped in the interface;
     // nothing in software can undo that, so tell the user for five seconds.
@@ -856,6 +872,10 @@ bool MainComponent::startOutput (const juce::String& id, const juce::String& nam
         // The start waits for the render thread (up to 2 s), so keep the timer
         // and the device watch from re-entering while it runs.
         const juce::ScopedValueSetter<bool> busy (deviceBusy, true);
+
+        // A restart after an unplug should reuse what this machine learned,
+        // not start from the endpoint minimum again.
+        engine.setOutputPeriodHintFrames (settings.outputPeriodHintFrames);
         started = engine.setOutputDevice (id);
     }
 

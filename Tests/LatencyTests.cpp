@@ -7,6 +7,7 @@
 #include <JuceHeader.h>
 
 #include "../Source/Audio/BacklogTarget.h"
+#include "../Source/Audio/PeriodPolicy.h"
 #include "../Source/Audio/RingBuffer.h"
 #include "../Source/Audio/SharedStreamFormat.h"
 #include "../Source/Audio/WasapiOutputDevice.h"
@@ -145,6 +146,82 @@ public:
             expectEquals (chooseSharedStreamFormat (true, 48000, 48000).rate, 48000);
             expectEquals (chooseSharedStreamFormat (false, 48000, 48000).rate, 48000);
             expect (! chooseSharedStreamFormat (false, 48000, 48000).convert);
+        }
+
+        beginTest ("period policy: initial period rounds up to an allowed step");
+        {
+            // The VB cable is expected to report a 128-frame minimum and a
+            // 16-frame grid here; the real numbers come from
+            // GetSharedModeEnginePeriod at run time. A hint between two steps
+            // must choose the larger one: a smaller period than the endpoint
+            // offers is not an option.
+            expectEquals (PeriodPolicy::initialPeriod (128, 16, 480, 0), 128);
+            expectEquals (PeriodPolicy::initialPeriod (128, 16, 480, 100), 128);
+            expectEquals (PeriodPolicy::initialPeriod (128, 16, 480, 128), 128);
+            expectEquals (PeriodPolicy::initialPeriod (128, 16, 480, 129), 144);
+            expectEquals (PeriodPolicy::initialPeriod (128, 16, 480, 160), 160);
+            expectEquals (PeriodPolicy::initialPeriod (128, 16, 480, 479), 480);
+            expectEquals (PeriodPolicy::initialPeriod (128, 16, 480, 480), 480);
+            expectEquals (PeriodPolicy::initialPeriod (128, 16, 480, 10000), 480);
+
+            // Degenerate ranges keep the minimum and must not divide by zero.
+            expectEquals (PeriodPolicy::initialPeriod (128, 0, 480, 200), 128);
+            expectEquals (PeriodPolicy::initialPeriod (480, 16, 128, 0), 480);
+            expectEquals (PeriodPolicy::initialPeriod (128, -16, 480, 200), 128);
+        }
+
+        beginTest ("period policy: next larger steps by the fundamental");
+        {
+            expectEquals (PeriodPolicy::nextLarger (128, 128, 16, 480), 144);
+            expectEquals (PeriodPolicy::nextLarger (144, 128, 16, 480), 160);
+            expectEquals (PeriodPolicy::nextLarger (464, 128, 16, 480), 480);
+            expectEquals (PeriodPolicy::nextLarger (480, 128, 16, 480), 480);
+            expectEquals (PeriodPolicy::nextLarger (1000, 128, 16, 480), 1000);
+
+            // Same degenerate rules as initialPeriod.
+            expectEquals (PeriodPolicy::nextLarger (200, 128, 0, 480), 128);
+            expectEquals (PeriodPolicy::nextLarger (200, 480, 16, 128), 480);
+        }
+
+        beginTest ("starvation window: two events within the window escalate");
+        {
+            StarvationWindow window;
+            window.reset (0.0);
+
+            // Nothing during the first second after Start: a fresh endpoint is
+            // priming and its first events are not evidence of a late thread.
+            expect (! window.record (0.2));
+            expect (! window.record (0.9));
+            expectEquals (window.count(), 0);
+
+            expect (! window.record (1.2));
+            expect (window.record (1.3));
+        }
+
+        beginTest ("starvation window: events more than a window apart do not");
+        {
+            StarvationWindow window;
+            window.reset (0.0);
+
+            expect (! window.record (100.0));
+            expect (! window.record (161.0), "61 s apart is outside the 60 s window");
+
+            // A third event close to the second does escalate: only the events
+            // still inside the window count.
+            expect (window.record (162.0));
+        }
+
+        beginTest ("starvation window: a long quiet stretch forgets old events");
+        {
+            StarvationWindow window;
+            window.reset (0.0);
+
+            for (int i = 0; i < 20; ++i)
+                window.record (100.0 + i * 61.0);
+
+            // Each event arrives after the previous one left the window.
+            expect (! window.record (2000.0));
+            expectEquals (window.countWithin (2000.0), 1);
         }
 
         beginTest ("backlog floor");

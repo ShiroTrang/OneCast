@@ -17,6 +17,11 @@ struct AppSettings
     bool startMinimized   = false;
     juce::String muteHotkey { "Ctrl+Alt+M" };
 
+    /// IAudioClient3 period that stayed glitch-free last run, in frames.
+    /// 0 = no hint, start at the endpoint minimum; negative and unreadable
+    /// values load as 0.
+    int outputPeriodHintFrames = 0;
+
     bool operator== (const AppSettings&) const = default;
 };
 

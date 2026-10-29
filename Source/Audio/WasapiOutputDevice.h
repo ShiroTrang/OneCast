@@ -36,9 +36,13 @@ public:
                              rate and the drift-compensated reader converts; the
                              legacy shared rung keeps AUTOCONVERTPCM. Pass 0 to use
                              the endpoint's native mix format rate.
+        @param periodHintFrames  IAudioClient3 period this machine sustained last
+                             time, in frames; 0 starts at the endpoint minimum.
+                             The engine escalates from there if the endpoint
+                             starves.
         @returns true on success, false on failure (check getErrorMessage()). */
     bool start (const juce::String& deviceId, RingBuffer& inputBuffer,
-                int producerRate = 0);
+                int producerRate = 0, int periodHintFrames = 0);
     void stop();
 
     /** Tell the render thread the rate the producer currently writes at. Call
@@ -88,6 +92,21 @@ public:
     /** Failed GetBuffer or ReleaseBuffer calls on the render client. */
     int getBufferErrorCount() const noexcept;
 
+    /** Render events at which GetCurrentPadding found the endpoint empty: the
+        endpoint had played everything and ran dry since the previous event.
+        This is the real glitch signal, unlike a late event that still filled
+        the buffer. */
+    int getStarvedEventCount() const noexcept;
+
+    /** The IAudioClient3 period currently in use, in frames. Changes when the
+        render thread escalates to a larger period; 0 when the stream is not
+        shared low latency. */
+    int getOutputPeriodFrames() const noexcept;
+
+    /** Times the render thread left its loop to raise the period (or to fall
+        back to the standard shared rung) because the endpoint starved. */
+    int getEscalationCount() const noexcept;
+
     struct DeviceInfo
     {
         juce::String id;
@@ -121,7 +140,8 @@ private:
     };
 
     void setError (ErrorCode code, int detail = 0) noexcept;
-    void renderThread (juce::String deviceId, RingBuffer* buffer, int producerRate);
+    void renderThread (juce::String deviceId, RingBuffer* buffer, int producerRate,
+                       int periodHintFrames);
 
     std::thread thread;
     HANDLE stopEvent   = nullptr;
@@ -149,6 +169,13 @@ private:
     std::atomic<double> maxRenderGapMs { 0.0 };
     std::atomic<int>    lateEventCount { 0 };
     std::atomic<int>    bufferErrorCount { 0 };
+
+    // The endpoint buffer was empty when a render event arrived: the endpoint
+    // played everything it had. A thread that woke up too late produces this,
+    // so it drives the adaptive period.
+    std::atomic<int>    starvedEventCount { 0 };
+    std::atomic<int>    outputPeriodFrames { 0 };
+    std::atomic<int>    escalationCount { 0 };
 
     // Honest output latency, published by the render thread. The ring fill is
     // in producer frames and the endpoint padding in device frames, both

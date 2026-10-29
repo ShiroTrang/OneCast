@@ -105,6 +105,16 @@ public:
     bool isOutputRunning() const;
     bool hasOutputError() const;
 
+    /// The IAudioClient3 period that stayed glitch-free on the previous run,
+    /// in frames; 0 starts at the endpoint minimum. Set before the next
+    /// setOutputDevice() call. Thread-safe.
+    void setOutputPeriodHintFrames (int frames) noexcept;
+
+    /// The period the cable stream is using now, in frames; 0 when no
+    /// low-latency stream is open. Stored in the settings so the next launch
+    /// starts where this machine settled.
+    int getOutputPeriodFrames() const noexcept;
+
     // ------------------------------------------------------------------
     //  Processing
     // ------------------------------------------------------------------
@@ -217,6 +227,7 @@ private:
     std::atomic<int> inputLatencySamples_ { 0 };
     std::atomic<double> sampleRate_ { 48000.0 };
     std::atomic<int> bufferSize_ { 0 };
+    std::atomic<int> outputPeriodHintFrames_ { 0 };
 
     std::atomic<float> rawPeakDb_ { -200.0f };
     std::atomic<bool> inputClip_ { false };

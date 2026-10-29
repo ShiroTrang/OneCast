@@ -550,7 +550,18 @@ bool AudioEngine::setOutputDevice (const juce::String& endpointId)
     const int rate = juce::roundToInt (sampleRate_.load (std::memory_order_relaxed));
 
     return output_.start (endpointId, outputRing_,
-                          rate > 0 ? rate : preferredSampleRate);
+                          rate > 0 ? rate : preferredSampleRate,
+                          outputPeriodHintFrames_.load (std::memory_order_relaxed));
+}
+
+void AudioEngine::setOutputPeriodHintFrames (int frames) noexcept
+{
+    outputPeriodHintFrames_.store (juce::jmax (0, frames), std::memory_order_relaxed);
+}
+
+int AudioEngine::getOutputPeriodFrames() const noexcept
+{
+    return output_.getOutputPeriodFrames();
 }
 
 juce::String AudioEngine::getOutputDeviceId() const
@@ -656,8 +667,11 @@ juce::String AudioEngine::describeLatency() const
          + " out=" + juce::String (outputMs, 1)
          + " mode=" + modeName
          + " period=" + juce::String (output_.getDevicePeriodMs(), 1) + " ms"
+         + " periodFrames=" + juce::String (output_.getOutputPeriodFrames())
+         + " esc=" + juce::String (output_.getEscalationCount())
          + " late=" + juce::String (output_.getLateEventCount())
          + " maxGap=" + juce::String (output_.getMaxRenderGapMs(), 1) + " ms"
+         + " starved=" + juce::String (output_.getStarvedEventCount())
          + " resync=" + juce::String (output_.getResyncCount())
          + " underrun=" + juce::String (output_.getUnderrunCount())
          + " bufErr=" + juce::String (output_.getBufferErrorCount());
