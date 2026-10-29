@@ -10,6 +10,7 @@
 #include "../Source/Audio/DriftCompensatedReader.h"
 #include "../Source/Audio/OutputCeiling.h"
 #include "../Source/Audio/PeriodPolicy.h"
+#include "../Source/Audio/RenderFill.h"
 #include "../Source/Audio/RingBuffer.h"
 #include "../Source/Audio/SharedStreamFormat.h"
 #include "../Source/Audio/WasapiOutputDevice.h"
@@ -407,32 +408,69 @@ public:
             }
         }
 
-        beginTest ("starvation window: two events within the window escalate");
+        beginTest ("default start period: twice the minimum when there is no hint");
         {
-            EscalationWindow window;
-            window.reset (0.0);
+            // Ruling 20: no learned hint, start one step above the minimum so
+            // one overrun does not glitch before the first escalation.
+            expectEquals (PeriodPolicy::defaultStartPeriod (128, 1, 480), 256);
+            expectEquals (PeriodPolicy::defaultStartPeriod (128, 16, 480), 256);
+            expectEquals (PeriodPolicy::defaultStartPeriod (128, 16, 256), 256);
+            expectEquals (PeriodPolicy::defaultStartPeriod (240, 16, 480), 480);
 
-            // Nothing during the first second after Start: a fresh endpoint is
-            // priming and its first events are not evidence of a late thread.
-            expect (! window.record (0.2));
-            expect (! window.record (0.9));
-            expectEquals (window.count(), 0);
+            // A range whose top is the minimum cannot be doubled.
+            expectEquals (PeriodPolicy::defaultStartPeriod (480, 16, 480), 480);
 
-            expect (! window.record (1.2));
-            expect (window.record (1.3));
+            // Degenerate ranges keep the minimum, like initialPeriod.
+            expectEquals (PeriodPolicy::defaultStartPeriod (128, 0, 480), 128);
+            expectEquals (PeriodPolicy::defaultStartPeriod (480, 16, 128), 480);
+            expectEquals (PeriodPolicy::defaultStartPeriod (0, 16, 480), 1);
+            expectEquals (PeriodPolicy::defaultStartPeriod (-5, 16, 480), 1);
         }
 
-        beginTest ("starvation window: events more than a window apart do not");
+        beginTest ("render fill: release only what the reader produced");
         {
-            EscalationWindow window;
-            window.reset (0.0);
+            constexpr int freeFrames = 432;
+            constexpr int keepAlive = 480;   // one 432-frame period + 1 ms
 
-            expect (! window.record (100.0));
-            expect (! window.record (161.0), "61 s apart is outside the 60 s window");
+            // Full supply: release it all and leave the endpoint full.
+            auto fill = RenderFill::framesToRelease (freeFrames, 518, 432, keepAlive, false);
+            expectEquals (fill.frames, 432);
+            expect (! fill.fallbackToUnderrun);
 
-            // A third event close to the second does escalate: only the events
-            // still inside the window count.
-            expect (window.record (162.0));
+            // Short supply with enough padding: release only the short count,
+            // the endpoint still reaches the next event.
+            fill = RenderFill::framesToRelease (856, 518, 300, keepAlive, false);
+            expectEquals (fill.frames, 300);
+            expect (! fill.fallbackToUnderrun);
+
+            // Zero produced with enough padding: releasing 0 is valid.
+            fill = RenderFill::framesToRelease (freeFrames, 900, 0, keepAlive, false);
+            expectEquals (fill.frames, 0);
+            expect (! fill.fallbackToUnderrun);
+
+            // Short supply below the keep-alive: the input has really stopped,
+            // so the whole free space must be filled with the fade and silence.
+            fill = RenderFill::framesToRelease (856, 100, 300, keepAlive, false);
+            expectEquals (fill.frames, 856);
+            expect (fill.fallbackToUnderrun);
+
+            // Priming keeps today's path: the whole free space, audio or silence.
+            fill = RenderFill::framesToRelease (freeFrames, 518, 0, keepAlive, true);
+            expectEquals (fill.frames, 432);
+            expect (! fill.fallbackToUnderrun);
+        }
+
+        beginTest ("risky gap cover: use the padding actually written");
+        {
+            // The escalated rung: a 950-frame buffer is 19.8 ms, but after a
+            // short write the endpoint holds only 632 frames (13.2 ms).
+            expect (! RenderFill::gapIsRisky (16.4, 950, 48000.0),
+                    "a full endpoint buffer covers 19.8 ms");
+            expect (RenderFill::gapIsRisky (16.4, 632, 48000.0),
+                    "a short-written endpoint only covers 13.2 ms");
+
+            // Degenerate rate: no measurement, no risky gap.
+            expect (! RenderFill::gapIsRisky (16.4, 632, 0.0));
         }
 
         beginTest ("starvation window: a long quiet stretch forgets old events");
@@ -448,26 +486,39 @@ public:
             expectEquals (window.countWithin (2000.0), 1);
         }
 
-        beginTest ("risky gap window: two gaps within the window escalate");
+        beginTest ("risky gap window: the first gap after the grace escalates");
         {
+            // Ruling 20: a risky wake-up gap is conclusive on its own, so the
+            // risky window runs with threshold 1. A fresh endpoint is priming
+            // during the first second, and those gaps are not stored.
             EscalationWindow window;
-            window.reset (0.0);
+            window.reset (0.0, 1);
 
-            // A fresh endpoint is priming: gaps during the first second say
-            // nothing about scheduling and are not stored.
             expect (! window.record (0.2, 17.0));
             expect (! window.record (0.9, 18.0));
             expectEquals (window.count(), 0);
 
-            expect (! window.record (2.0, 6.0));
-            expect (window.record (20.0, 12.5));
+            expect (window.record (1.2, 12.5));
 
-            // The period comes from the largest gap still inside the window,
-            // not from the event that reached the threshold.
-            expectWithinAbsoluteError (window.largestWithin (20.0), 12.5, 1e-9);
+            // The period comes from the largest gap still inside the window.
+            expectWithinAbsoluteError (window.largestWithin (1.2), 12.5, 1e-9);
         }
 
-        beginTest ("risky gap window: gaps more than a window apart do not escalate");
+        beginTest ("starvation window: two events within the window escalate");
+        {
+            // The default threshold is starvation's: two events inside 60 s.
+            EscalationWindow window;
+            window.reset (0.0);
+
+            expect (! window.record (0.2));
+            expect (! window.record (0.9));
+            expectEquals (window.count(), 0);
+
+            expect (! window.record (1.2));
+            expect (window.record (1.3));
+        }
+
+        beginTest ("escalation window: gaps more than a window apart do not escalate");
         {
             EscalationWindow window;
             window.reset (0.0);
@@ -496,31 +547,39 @@ public:
             expectEquals (target.getTargetFrames(), period + margin + block);
         }
 
-        beginTest ("backlog covers a whole endpoint buffer request");
+        beginTest ("backlog stays period + margin + block when a request exceeds it");
         {
-            // At an escalated low-latency period the endpoint buffer is about
-            // 2.2 periods (403 and 886 frames at 48 kHz, as the soak showed).
-            // A late but still running event asks for the whole buffer: a ring
-            // sized for one period underruns, and the reader turns that into a
-            // 13 ms dropout while it re-primes.
-            constexpr int escalatedPeriod = 403;
-            constexpr int endpointBuffer = 886;
+            // The escalated rung of the 15-minute run: 432-frame period,
+            // 72-frame margin, 128-frame block at ratio 1, so exactly 632.
+            // A late event can still ask for the whole 950-frame buffer; the
+            // target grows for the five-second window and then comes back to
+            // one period, because a short read now keeps the endpoint alive
+            // without a whole buffer upstream.
+            constexpr int escalatedPeriod = 432;
+            constexpr int endpointBuffer = 950;
 
             BacklogTarget target;
-            target.prepare (rate, escalatedPeriod, block, 1.5, 5.0, rate, endpointBuffer);
+            target.prepare (rate, escalatedPeriod, block, 1.5, 5.0, rate);
+
             target.onRequest (escalatedPeriod);
+            const int steady = target.getTargetFrames();
 
-            std::printf ("    [measured] endpoint buffer cover: %d frames for a %d-frame request\n",
-                         target.getTargetFrames(), endpointBuffer);
+            target.onRequest (endpointBuffer);
+            const int peak = target.getTargetFrames();
 
-            expect (target.getTargetFrames() >= endpointBuffer,
-                    "the target must be able to answer a full-buffer request");
-
-            // A long quiet stretch must not shrink it back below the buffer.
             for (int i = 0; i < 4000; ++i)
                 target.onRequest (escalatedPeriod);
 
-            expect (target.getTargetFrames() >= endpointBuffer);
+            const int settled = target.getTargetFrames();
+
+            std::printf ("    [measured] backlog: steady %d, peak %d, settled %d "
+                         "(period %d, margin %d, block %d)\n",
+                         steady, peak, settled, escalatedPeriod,
+                         expectedMargin (rate, 1.5), block);
+
+            expectEquals (steady, 432 + 72 + 128);
+            expectEquals (peak, endpointBuffer + 72 + 128);
+            expectEquals (settled, 432 + 72 + 128);
         }
 
         beginTest ("no allocation");

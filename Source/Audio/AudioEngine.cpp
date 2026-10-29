@@ -680,6 +680,7 @@ juce::String AudioEngine::describeLatency() const
          + " riskyMax=" + juce::String (output_.getMaxRiskyGapMs(), 1) + " ms"
          + " resync=" + juce::String (output_.getResyncCount())
          + " underrun=" + juce::String (output_.getUnderrunCount())
+         + " short=" + juce::String (output_.getShortReadCount())
          + " bufErr=" + juce::String (output_.getBufferErrorCount());
 }
 

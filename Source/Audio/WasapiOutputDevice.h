@@ -89,6 +89,12 @@ public:
     /** Resyncs (large backlog drops) done by the drift-compensated reader. */
     int getResyncCount() const noexcept;
 
+    /** Render events at which the ring could not supply the whole free space
+        and only the frames it produced were released. A short read by itself
+        is repaired by the endpoint padding, not an underrun; a rising count
+        means the ring is being asked for more than it holds. */
+    int getShortReadCount() const noexcept;
+
     /** Longest interval between consecutive render events since the stream
         opened, in milliseconds, measured with QueryPerformanceCounter. */
     double getMaxRenderGapMs() const noexcept;
@@ -188,6 +194,7 @@ private:
     std::atomic<int>    outputMode { (int) OutputMode::shared };
     std::atomic<int>    underrunCount { 0 };
     std::atomic<int>    resyncCount { 0 };
+    std::atomic<int>    shortReadCount { 0 };
 
     // Render-deadline diagnostics, published by the render thread. A late
     // event or a buffer error is counted, never logged: the loop may not touch

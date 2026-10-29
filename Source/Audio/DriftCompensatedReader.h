@@ -105,6 +105,66 @@ public:
     int read (RingBuffer& ring, float* const* dest, int numDestChannels,
               int numFrames, double nominalRatio) noexcept
     {
+        return readInternal (ring, dest, numDestChannels, numFrames, nominalRatio, false);
+    }
+
+    /// Produce at most @p framesRequested frames, returning how many were
+    /// produced.
+    ///
+    /// Unlike read(), a shortfall is not an underrun: the ring simply cannot
+    /// supply the whole request yet, which the render loop can repair by
+    /// releasing only what was produced and keeping the endpoint alive with
+    /// what it still holds. Nothing is counted, faded or re-primed here, so
+    /// the next call continues from the same interpolator state with no step.
+    ///
+    /// Only the first `return` frames of @p dest are written. When the ring
+    /// holds enough for the whole request the result is exactly read()'s.
+    int readUpTo (RingBuffer& ring, float* const* dest, int numDestChannels,
+                  int framesRequested, double nominalRatio) noexcept
+    {
+        return readInternal (ring, dest, numDestChannels, framesRequested, nominalRatio, true);
+    }
+
+    /// Turn a readUpTo() shortfall into the classic underrun, after the caller
+    /// has established that the endpoint cannot stay covered until the next
+    /// event: the input has really stopped. Fades the produced frames out over
+    /// the rest of the event, counts the underrun and re-primes, exactly like
+    /// read()'s shortfall path. Consumer thread only.
+    void finishAsUnderrun (float* const* dest, int numDestChannels,
+                           int producedFrames, int numFrames) noexcept
+    {
+        const int produced = juce::jlimit (0, juce::jmax (0, numFrames), producedFrames);
+
+        fadeOutAndSilence (dest, juce::jmin (channels, numDestChannels),
+                           produced, juce::jmax (0, numFrames));
+        underruns.fetch_add (1, std::memory_order_relaxed);
+        startPriming();
+    }
+
+    int    getTargetFill() const noexcept    { return target.load (std::memory_order_relaxed); }
+
+    /// Consumer thread only. The previous value is remembered so a re-prime
+    /// can ignore a target that the same (late) render event just raised.
+    void   setTargetFill (int frames) noexcept
+    {
+        targetBeforeLastSet = target.exchange (juce::jmax (1, frames),
+                                               std::memory_order_relaxed);
+    }
+    double getCurrentRatio() const noexcept  { return currentRatio.load (std::memory_order_relaxed); }
+    int    getUnderrunCount() const noexcept { return underruns.load (std::memory_order_relaxed); }
+    int    getResyncCount() const noexcept   { return resyncs.load (std::memory_order_relaxed); }
+
+    /// Consumer thread only.
+    bool isPriming() const noexcept          { return priming; }
+
+private:
+    /// Shared body of read() and readUpTo(): the ratio control loop, the
+    /// priming exit and the interpolation are identical, and only the
+    /// handling of a shortfall differs. `allowShort` makes it return what the
+    /// ring holds instead of fading, counting and re-priming.
+    int readInternal (RingBuffer& ring, float* const* dest, int numDestChannels,
+                      int numFrames, double nominalRatio, bool allowShort) noexcept
+    {
         jassert (numFrames <= maxFrames);
         numFrames = juce::jmin (numFrames, maxFrames);
 
@@ -159,7 +219,7 @@ public:
         const int needed = juce::jmin (scratchSize,
                                        static_cast<int> (std::ceil (numFrames * ratio)) + 2);
 
-        // A shortfall: play what is there, then fade into silence.
+        // A shortfall: play what is there, then (for read()) fade into silence.
         const bool partial = available < needed;
         int producible = numFrames;
 
@@ -172,6 +232,12 @@ public:
 
             if (producible <= 0)
             {
+                // A short read has nothing to deliver yet and must not count
+                // an underrun: the render loop keeps the endpoint alive with
+                // the padding it still holds.
+                if (allowShort)
+                    return 0;
+
                 underruns.fetch_add (1, std::memory_order_relaxed);
                 startPriming();
                 return silence (dest, numDestChannels, numFrames);
@@ -204,6 +270,9 @@ public:
         if (! partial)
             return numFrames;
 
+        if (allowShort)
+            return producible;
+
         fadeOutAndSilence (dest, juce::jmin (channelsToWrite, numDestChannels),
                            producible, numFrames);
         underruns.fetch_add (1, std::memory_order_relaxed);
@@ -211,23 +280,6 @@ public:
         return producible;
     }
 
-    int    getTargetFill() const noexcept    { return target.load (std::memory_order_relaxed); }
-
-    /// Consumer thread only. The previous value is remembered so a re-prime
-    /// can ignore a target that the same (late) render event just raised.
-    void   setTargetFill (int frames) noexcept
-    {
-        targetBeforeLastSet = target.exchange (juce::jmax (1, frames),
-                                               std::memory_order_relaxed);
-    }
-    double getCurrentRatio() const noexcept  { return currentRatio.load (std::memory_order_relaxed); }
-    int    getUnderrunCount() const noexcept { return underruns.load (std::memory_order_relaxed); }
-    int    getResyncCount() const noexcept   { return resyncs.load (std::memory_order_relaxed); }
-
-    /// Consumer thread only.
-    bool isPriming() const noexcept          { return priming; }
-
-private:
     int silence (float* const* dest, int numDestChannels, int numFrames) noexcept
     {
         for (int ch = 0; ch < numDestChannels; ++ch)

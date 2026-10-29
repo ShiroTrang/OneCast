@@ -11,9 +11,10 @@
 ///
 /// The target is expressed in device frames and is what the drift-compensated
 /// reader holds in the ring (converted to producer frames by the caller). It
-/// never falls below one period or one endpoint buffer request, whichever is
-/// larger: a late event can ask for the whole endpoint buffer, and a ring
-/// sized for one period only would underrun and re-prime into a dropout.
+/// never falls below one device period, so a stream cannot be asked to keep
+/// less than the endpoint consumes in one event. A late event's whole-buffer
+/// request is answered by releasing only what the ring produced, not by
+/// holding a whole buffer upstream (see RenderFill).
 class BacklogTarget
 {
 public:
@@ -32,19 +33,12 @@ public:
     ///                             in producer frames and converted to device
     ///                             frames when the target is reported; 0 uses
     ///                             the device rate (a ratio of one).
-    /// @param maxRequestFrames     Largest request one render event can make,
-    ///                             normally the endpoint buffer size. A late
-    ///                             (but still running) event may ask for the
-    ///                             whole buffer, and a target below it would
-    ///                             make the reader underrun and re-prime into a
-    ///                             long dropout. 0 keeps `periodFrames`.
     void prepare (double deviceRate, int periodFrames, int producerBlockFrames,
                   double marginMs = 1.5, double shrinkAfterSeconds = 5.0,
-                  double producerRate = 0.0, int maxRequestFrames = 0) noexcept
+                  double producerRate = 0.0) noexcept
     {
         rate   = deviceRate > 1.0 ? deviceRate : 1.0;
         period = std::max (1, periodFrames);
-        floor  = std::max (period, maxRequestFrames);
         block  = std::max (0, producerBlockFrames);
         producerRate_ = producerRate > 1.0 ? producerRate : 0.0;
         margin = std::max (0, (int) std::lround (rate * marginMs / 1000.0));
@@ -59,23 +53,21 @@ public:
         dropPerEvent = (double) period / eventsPerSecond;
         dropBudget   = dropPerEvent;
 
-        // Start with a full window of the floor request. onRequest() then
-        // overwrites the oldest entry, so a burst leaves after the window.
-        history.fill (floor);
+        // Start with a full window of one period. onRequest() then overwrites
+        // the oldest entry, so a burst leaves after the window.
+        history.fill (period);
         writeIndex = 0;
-        windowMax  = floor;
-        covered    = (double) floor;
+        windowMax  = period;
+        covered    = (double) period;
     }
 
     /// Call once per render event with the frames the endpoint requested.
     /// Real-time safe: fixed storage, no allocation, no locking.
     void onRequest (int framesRequested) noexcept
     {
-        // The floor is the largest request one event can make (the endpoint
-        // buffer) or one period, whichever is larger. A smaller request is not
-        // a smaller latency: the backlog must still be able to answer a full
-        // buffer request after a stall without underrunning.
-        const int request = std::max (floor, framesRequested);
+        // The floor is one period: a request smaller than that is not a
+        // smaller latency, it is just the endpoint staying within its buffer.
+        const int request = std::max (period, framesRequested);
 
         const int outgoing = history[(size_t) writeIndex];
         history[(size_t) writeIndex] = request;
@@ -146,7 +138,6 @@ public:
 private:
     double rate         = 48000.0;
     int    period       = 1;
-    int    floor        = 1;
     int    block        = 0;
     int    margin       = 0;
     int    window       = 1;

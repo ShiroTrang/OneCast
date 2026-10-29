@@ -249,6 +249,139 @@ public:
             expect (ring.getAvailableForRead() <= 1000, "backlog cut to the target");
         }
 
+        beginTest ("short read returns what the ring holds without underrunning");
+        {
+            RingBuffer ring (1, 4096);
+            DriftCompensatedReader reader;
+            reader.prepare (1, 128, 48000.0, 256);
+
+            std::vector<float> data (1024, 0.5f);
+            const float* source[] = { data.data() };
+            ring.write (source, 1024, 1);
+
+            float out[128];
+            float* dest[] = { out };
+
+            // Leave priming with a full read first: readUpTo is the render
+            // loop's path for an already primed stream.
+            expectEquals (reader.read (ring, dest, 1, 128, 1.0), 128);
+
+            // Exactly 60 frames left, fewer than the 128 asked for.
+            ring.discard (ring.getAvailableForRead() - 60);
+
+            const int underrunsBefore = reader.getUnderrunCount();
+            const int produced = reader.readUpTo (ring, dest, 1, 128, 1.0);
+            const double ratio = reader.getCurrentRatio();
+            const int expected = (int) std::floor ((60.0 - 2.0) / ratio);
+
+            std::printf ("    [measured] short read: %d of 128 frames, expected %d "
+                         "(ratio %.6f), ring %d\n",
+                         produced, expected, ratio, ring.getAvailableForRead());
+
+            expect (produced > 0, "the available audio is delivered");
+            expect (produced < 128, "fewer frames than asked for");
+            expectEquals (produced, expected);
+            expectEquals (reader.getUnderrunCount(), underrunsBefore,
+                          "a short read is not an underrun");
+            expect (! reader.isPriming(), "a short read must not re-prime");
+        }
+
+        beginTest ("short read continues seamlessly into the next read");
+        {
+            RingBuffer ring (1, 65536);
+            DriftCompensatedReader reader;
+            reader.prepare (1, 128, 48000.0, 256);
+
+            const int total = 4096;
+            std::vector<float> sine ((size_t) total);
+            for (int i = 0; i < total; ++i)
+                sine[(size_t) i] = (float) std::sin (twoPi * 1000.0 * i / 48000.0);
+
+            int written = 0;
+            const auto feed = [&] (int frames)
+            {
+                const int chunk = juce::jmin (frames, total - written);
+                const float* source[] = { sine.data() + written };
+                written += ring.write (source, chunk, 1);
+            };
+
+            float block[128];
+            float* dest[] = { block };
+            std::vector<float> received;
+
+            // Two full reads consume about 2 * (128 + 2) input frames, so the
+            // 384 fed here leave the next request short by a few frames.
+            feed (384);
+            expectEquals (reader.read (ring, dest, 1, 128, 1.0), 128);
+            received.insert (received.end(), block, block + 128);
+            expectEquals (reader.read (ring, dest, 1, 128, 1.0), 128);
+            received.insert (received.end(), block, block + 128);
+
+            const int underrunsBefore = reader.getUnderrunCount();
+            const int produced = reader.readUpTo (ring, dest, 1, 128, 1.0);
+            received.insert (received.end(), block, block + produced);
+
+            std::printf ("    [measured] seamless short read: %d of 128 frames, "
+                         "underrun %d -> %d, priming %d\n",
+                         produced, underrunsBefore, reader.getUnderrunCount(),
+                         reader.isPriming() ? 1 : 0);
+
+            expect (produced > 0 && produced < 128, "the event really was short");
+            expectEquals (reader.getUnderrunCount(), underrunsBefore);
+            expect (! reader.isPriming());
+
+            // The producer catches up; the waveform must continue with no
+            // splice, because the interpolator keeps its state.
+            feed (1024);
+            expectEquals (reader.read (ring, dest, 1, 128, 1.0), 128);
+            received.insert (received.end(), block, block + 128);
+
+            float maxStep = 0.0f;
+            for (size_t i = 1; i < received.size(); ++i)
+                maxStep = juce::jmax (maxStep, std::abs (received[i] - received[i - 1]));
+
+            std::printf ("    [measured] seamless short read: max step %.5f\n", maxStep);
+
+            // A 1 kHz sine at 48 kHz steps by at most 2*pi*1000/48000 = 0.131.
+            expectLessThan (maxStep, 0.14f, "the short read must not splice the waveform");
+        }
+
+        beginTest ("readUpTo equals read when the ring has enough");
+        {
+            const int total = 1024;
+            std::vector<float> sine ((size_t) total);
+            for (int i = 0; i < total; ++i)
+                sine[(size_t) i] = (float) std::sin (twoPi * 440.0 * i / 48000.0);
+
+            RingBuffer ringRead (1, 4096), ringUpTo (1, 4096);
+            DriftCompensatedReader readerRead, readerUpTo;
+            readerRead.prepare (1, 128, 48000.0, 256);
+            readerUpTo.prepare (1, 128, 48000.0, 256);
+
+            const float* source[] = { sine.data() };
+            ringRead.write (source, total, 1);
+            ringUpTo.write (source, total, 1);
+
+            float blockRead[128], blockUpTo[128];
+            float* destRead[] = { blockRead };
+            float* destUpTo[] = { blockUpTo };
+
+            // Same priming read on both.
+            expectEquals (readerRead.read (ringRead, destRead, 1, 128, 1.0), 128);
+            expectEquals (readerUpTo.read (ringUpTo, destUpTo, 1, 128, 1.0), 128);
+
+            expectEquals (readerRead.read (ringRead, destRead, 1, 128, 1.0), 128);
+            expectEquals (readerUpTo.readUpTo (ringUpTo, destUpTo, 1, 128, 1.0), 128);
+
+            float maxDifference = 0.0f;
+            for (int i = 0; i < 128; ++i)
+                maxDifference = juce::jmax (maxDifference,
+                                            std::abs (blockRead[i] - blockUpTo[i]));
+
+            expectLessThan (maxDifference, 1.0e-7f,
+                            "a fully supplied readUpTo must match read sample for sample");
+        }
+
         beginTest ("passes a sine through intact at ratio 1");
         {
             RingBuffer ring (1, 65536);

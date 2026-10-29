@@ -49,6 +49,25 @@ struct PeriodPolicy
         return (int) std::min<long long> (period, highest);
     }
 
+    /// The period to start a stream at when there is no learned hint.
+    ///
+    /// Ruling 20: the minimum period is the fastest but glitches on the first
+    /// wake-up that overruns it by a hair, and the user accepted a few
+    /// milliseconds more for stability. Twice the minimum, aligned to the
+    /// grid, leaves room for one overrun before the first escalation. A
+    /// positive hint still wins; this is only the no-evidence answer.
+    static int defaultStartPeriod (int minFrames, int fundamentalFrames,
+                                   int maxFrames) noexcept
+    {
+        // A nonsensical range is left to initialPeriod, which returns the
+        // minimum for it. The long long keeps a huge minimum from overflowing.
+        const long long doubled = (long long) minFrames * 2;
+        const long long capped  = std::min<long long> (doubled,
+                                                       std::max (minFrames, maxFrames));
+
+        return initialPeriod (minFrames, fundamentalFrames, maxFrames, (int) capped);
+    }
+
     /// The next larger allowed period, or `current` when already at max.
     static int nextLarger (int current, int minFrames, int fundamentalFrames,
                            int maxFrames) noexcept
@@ -137,8 +156,9 @@ struct PeriodPolicy
 /// QueryPerformanceCounter timestamps, each optionally carrying a magnitude
 /// (the duration of a risky gap). Real-time safe by construction - no
 /// allocation and no locking in record() - and pure so the decision can be
-/// tested without a device. The same thresholds serve starvation and risky
-/// wake-up gaps: both mean this machine cannot sustain the current period.
+/// tested without a device. Both starvation and risky wake-up gaps mean this
+/// machine cannot sustain the current period, but they need different
+/// thresholds, so each window is told its own when it is reset.
 class EscalationWindow
 {
 public:
@@ -148,17 +168,22 @@ public:
 
     /// Start a fresh window. `startSeconds` is on the same monotonic clock as
     /// record(); events during the first second after it are ignored.
-    void reset (double startSeconds) noexcept
+    /// `threshold` is how many events inside the window escalate: starvation
+    /// needs two, a risky wake-up gap is already conclusive on its own
+    /// (ruling 20), so the loop passes 1 for that window. One class, two
+    /// thresholds, no second copy of the counting logic.
+    void reset (double startSeconds, int threshold = PeriodPolicy::threshold) noexcept
     {
         startTime = startSeconds;
+        threshold_ = threshold > 0 ? threshold : 1;
         count_    = 0;
         writeIndex = 0;
     }
 
-    /// Record one event and report whether the threshold has been reached
-    /// inside the window. Returns false during the start-up grace and does not
-    /// store those events. `magnitude` is what largestWithin() reports for
-    /// this event; the starvation path leaves it at 0.
+    /// Record one event and report whether the window's threshold has been
+    /// reached. Returns false during the start-up grace and does not store
+    /// those events. `magnitude` is what largestWithin() reports for this
+    /// event; the starvation path leaves it at 0.
     bool record (double nowSeconds, double magnitude = 0.0) noexcept
     {
         if (! (nowSeconds - startTime >= PeriodPolicy::startupGraceSeconds))
@@ -171,7 +196,7 @@ public:
         if (count_ < capacity)
             ++count_;
 
-        return countWithin (nowSeconds) >= PeriodPolicy::threshold;
+        return countWithin (nowSeconds) >= threshold_;
     }
 
     /// How many stored events lie no more than `windowSeconds` before now.
@@ -210,6 +235,7 @@ private:
     std::array<double, capacity> magnitudes {};
     int    writeIndex = 0;
     int    count_     = 0;
+    int    threshold_ = PeriodPolicy::threshold;
     double startTime  = 0.0;
 };
 

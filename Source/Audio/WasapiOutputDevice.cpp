@@ -4,6 +4,7 @@
 #include "RingBuffer.h"
 #include "DriftCompensatedReader.h"
 #include "OutputCeiling.h"
+#include "RenderFill.h"
 #include "SharedStreamFormat.h"
 #include "../Diagnostics/StartupLog.h"
 #include <avrt.h>
@@ -192,6 +193,7 @@ bool WasapiOutputDevice::start (const juce::String& deviceId, RingBuffer& inputB
     outputMode.store ((int) OutputMode::shared, std::memory_order_relaxed);
     underrunCount.store (0, std::memory_order_relaxed);
     resyncCount.store (0, std::memory_order_relaxed);
+    shortReadCount.store (0, std::memory_order_relaxed);
     maxRenderGapMs.store (0.0, std::memory_order_relaxed);
     lateEventCount.store (0, std::memory_order_relaxed);
     bufferErrorCount.store (0, std::memory_order_relaxed);
@@ -262,6 +264,7 @@ void WasapiOutputDevice::stop()
     backlogTargetFrames.store (0, std::memory_order_relaxed);
     devicePeriodMs.store (0.0, std::memory_order_relaxed);
     resyncCount.store (0, std::memory_order_relaxed);
+    shortReadCount.store (0, std::memory_order_relaxed);
     maxRenderGapMs.store (0.0, std::memory_order_relaxed);
     lateEventCount.store (0, std::memory_order_relaxed);
     bufferErrorCount.store (0, std::memory_order_relaxed);
@@ -400,6 +403,11 @@ int WasapiOutputDevice::getUnderrunCount() const noexcept
 int WasapiOutputDevice::getResyncCount() const noexcept
 {
     return resyncCount.load (std::memory_order_relaxed);
+}
+
+int WasapiOutputDevice::getShortReadCount() const noexcept
+{
+    return shortReadCount.load (std::memory_order_relaxed);
 }
 
 double WasapiOutputDevice::getMaxRenderGapMs() const noexcept
@@ -693,6 +701,10 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     int sharedMaxPeriod   = 0;
     int sharedPeriod      = 0;
 
+    // Which rule picked the starting period, for the open-time log. Only rung
+    // 2 has a period grid to choose from.
+    const char* startPeriodRule = "none";
+
     // Initialize() succeeds at most once per client, so every rung starts
     // from a freshly activated one. A refused format or mode then cannot
     // poison the next attempt.
@@ -864,13 +876,18 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                         flags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
                                | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
 
-                    // Start at the smallest period the previous run sustained,
-                    // or at the endpoint minimum on a first run. Escalation
-                    // raises it later if this machine still starves.
-                    const int chosenPeriod = PeriodPolicy::initialPeriod ((int) sharedMin,
-                                                                         (int) fundamental,
-                                                                         (int) sharedMax,
-                                                                         periodHintFrames);
+                    // A hint from the last run wins. With none, start at twice
+                    // the minimum (ruling 20): the smallest period is the
+                    // fastest but glitches on the first wake-up that overruns
+                    // it by a hair, and the user accepted a few ms more for
+                    // stability. Escalation raises it further when needed.
+                    const int chosenPeriod = periodHintFrames > 0
+                        ? PeriodPolicy::initialPeriod ((int) sharedMin, (int) fundamental,
+                                                       (int) sharedMax, periodHintFrames)
+                        : PeriodPolicy::defaultStartPeriod ((int) sharedMin, (int) fundamental,
+                                                            (int) sharedMax);
+
+                    startPeriodRule = periodHintFrames > 0 ? "hint" : "no-hint-2x-min";
 
                     hr = client3->InitializeSharedAudioStream (flags, (UINT32) chosenPeriod,
                                                                (WAVEFORMATEX*) mixFormat,
@@ -1077,13 +1094,13 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     // BacklogTarget keeps the block in producer frames and converts it to
     // device frames itself; the target as a whole is then converted back to
     // producer frames here, so the block is not scaled twice.
-    // The endpoint buffer, not just the period, is the largest request a
-    // single event can make: after a stall the render thread is asked to fill
-    // the whole buffer, and the ring must already hold that much.
+    // The floor is one period: a whole-buffer request after a stall no longer
+    // needs a whole buffer in the ring, because the render loop releases only
+    // what the reader produced and keeps the endpoint alive with its padding.
     BacklogTarget backlog;
     backlog.prepare ((double) deviceSampleRate, periodFrames,
                      producerBlockSize.load (std::memory_order_relaxed),
-                     1.5, 5.0, initialProducerRate, (int) bufferSize);
+                     1.5, 5.0, initialProducerRate);
 
     const int initialTarget = (int) std::lround (backlog.getTargetFrames() * initialRatio);
 
@@ -1112,7 +1129,11 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                       + juce::String (deviceSampleRate) + " Hz period="
                       + juce::String (periodMs, 2) + " ms buffer="
                       + juce::String ((int) bufferSize) + " frames ("
-                      + juce::String (1000.0 * bufferSize / deviceSampleRate, 2) + " ms)");
+                      + juce::String (1000.0 * bufferSize / deviceSampleRate, 2) + " ms)"
+                      + (mode == OutputMode::sharedLowLatency
+                           ? " startPeriod=" + juce::String (startPeriodRule)
+                               + " hint=" + juce::String (periodHintFrames)
+                           : juce::String()));
 
     // The engine's real period grid on this machine, so a soak log shows what
     // the escalation had to choose from. Only rung 2 reports one.
@@ -1196,6 +1217,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     double biggestRiskyGapMs = 0.0;
     int lateEvents = 0;
     int riskyGaps = 0;
+    int shortReads = 0;
     int bufferErrors = 0;
 
     // The escalation target: a period in frames, or 0 for the standard shared
@@ -1206,14 +1228,21 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     EscalationCause escalationCause = EscalationCause::starved;
     double escalationGapMs = 0.0;
 
+    // A risky gap is recorded when it is measured, but GetCurrentPadding or
+    // GetBuffer can fail before the loop reaches the decision. Keep the
+    // decision here and honour it on the next event that gets that far, so a
+    // recorded risky gap is never dropped.
+    bool riskyEscalationPending = false;
+
     // Ignore events while a freshly started stream primes its endpoint.
     EscalationWindow starvation;
     starvation.reset (qpcSeconds());
 
-    // Risky wake-up gaps use the same threshold and grace: two stalls the
-    // buffer cannot cover within a minute mean the period is too small.
+    // Ruling 20: a risky wake-up gap is conclusive on its own (threshold 1),
+    // still after the same start-up grace. Starvation keeps its 2-in-60 s
+    // rule.
     EscalationWindow riskyGapsWindow;
-    riskyGapsWindow.reset (qpcSeconds());
+    riskyGapsWindow.reset (qpcSeconds(), 1);
 
     // ---- Re-open helpers (called outside the render loop) ----
     // Everything here may allocate and take a few milliseconds. The loop is
@@ -1266,7 +1295,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
         backlog.prepare ((double) deviceSampleRate, periodFrames,
                          producerBlockSize.load (std::memory_order_relaxed),
-                         1.5, 5.0, currentProducerRate, (int) bufferSize);
+                         1.5, 5.0, currentProducerRate);
 
         const int target = (int) std::lround (backlog.getTargetFrames() * ratio);
 
@@ -1289,8 +1318,9 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         previousEventQpc = {};
         havePreviousEvent = false;
         eventsSeen = 0;
+        riskyEscalationPending = false;
         starvation.reset (qpcSeconds());
-        riskyGapsWindow.reset (qpcSeconds());
+        riskyGapsWindow.reset (qpcSeconds(), 1);
 
         hr = audioClient->Start();
         if (FAILED (hr))
@@ -1460,13 +1490,19 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     {
         const double lateThresholdMs = 2.0 * periodMs;
 
-        // The buffer duration, not the period, decides whether a wake-up was
-        // audible: a 15 ms stall on a 5.8 ms endpoint buffer glitches the
-        // cable even though the next event still finds some padding. Keep
-        // half a millisecond of margin for an event that arrives just as the
-        // buffer runs dry.
-        const double coverMs = juce::jmax (0.0, 1000.0 * (double) bufferSize
-                                                  / (double) deviceSampleRate - 0.5);
+        // What the endpoint must still hold after a short write to reach the
+        // next event: one period plus a millisecond, so the producer's
+        // catch-up arrives before it runs dry. Below it the input has really
+        // stopped and the classic underrun path is the honest one.
+        const int keepAliveFrames = periodFrames
+                                    + (int) std::lround ((double) deviceSampleRate / 1000.0);
+
+        // What the endpoint held after the last write. The pre-fill below the
+        // stream left it full, and a priming/silence write fills it again, so
+        // this starts at the buffer size. A short write leaves less, and a
+        // gap the full buffer covered can then glitch silently: the risky
+        // test has to use what was actually written, not the buffer size.
+        int paddingAfterLastWrite = (int) bufferSize;
 
         // Liveness. A stream can keep running=true while nothing reaches the
         // cable: the events stop, or every GetCurrentPadding/GetBuffer fails.
@@ -1516,7 +1552,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                 // ask for a whole buffer after a stall. Feeding that to the
                 // backlog would raise the target for the rest of the session.
                 bool eventLate = false;
-                bool riskyGapTriggered = false;
+                double eventGapMs = 0.0;
 
                 // The first event only starts the clock: there is no previous
                 // render event to measure a gap against, and the interval since
@@ -1527,6 +1563,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                                            ? 1000.0 * (double) (eventQpc.QuadPart - previousEventQpc.QuadPart)
                                                / (double) qpcFrequency.QuadPart
                                            : 0.0;
+                    eventGapMs = gapMs;
 
                     if (gapMs > maxGapMs)
                     {
@@ -1542,10 +1579,14 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
                     // A risky gap is counted even when the endpoint still has
                     // padding afterwards: the cable already played silence for
-                    // the part of the gap the buffer could not hold. Only the
-                    // low-latency stream can escalate, so the window is fed
-                    // only there; the counters stay honest for every mode.
-                    if (gapMs > coverMs)
+                    // the part of the gap the endpoint could not hold. The
+                    // cover is what the last write left, not the buffer size:
+                    // a short write leaves less and a gap the full buffer
+                    // covered can still glitch. Only the low-latency stream
+                    // can escalate, so the window is fed only there; the
+                    // counters stay honest for every mode.
+                    if (RenderFill::gapIsRisky (gapMs, paddingAfterLastWrite,
+                                                (double) deviceSampleRate))
                     {
                         riskyGapCount.store (++riskyGaps, std::memory_order_relaxed);
 
@@ -1556,8 +1597,22 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                                                  std::memory_order_relaxed);
                         }
 
-                        if (mode == OutputMode::sharedLowLatency)
-                            riskyGapTriggered = riskyGapsWindow.record (eventSeconds, gapMs);
+                        // Ruling 20: the first risky gap after the grace is
+                        // enough. Decide now and remember it, because a failed
+                        // GetCurrentPadding/GetBuffer below would otherwise
+                        // skip the decision for this event.
+                        if (mode == OutputMode::sharedLowLatency
+                            && riskyGapsWindow.record (eventSeconds, gapMs))
+                        {
+                            escalationGapMs = riskyGapsWindow.largestWithin (eventSeconds);
+                            escalateToPeriod = PeriodPolicy::escalationTarget (
+                                escalationGapMs, (double) deviceSampleRate,
+                                (double) bufferSize / (double) juce::jmax (1, sharedPeriod),
+                                sharedPeriod, sharedMinPeriod, sharedFundamental,
+                                sharedMaxPeriod);
+                            escalationCause = EscalationCause::riskyGap;
+                            riskyEscalationPending = true;
+                        }
                     }
                 }
                 else
@@ -1605,29 +1660,25 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                     if (mode == OutputMode::sharedLowLatency
                         && starvation.record (eventSeconds))
                     {
-                        // No gap evidence here: one period step is the old
-                        // starvation rule, and 0 at the maximum period means
-                        // the standard shared rung.
+                        // One period step, as before; 0 at the maximum period
+                        // means the standard shared rung. Carry this event's
+                        // measured gap so the log says what triggered it.
                         escalateToPeriod = PeriodPolicy::escalationTarget (
                             0.0, (double) deviceSampleRate, bufferToPeriodRatio,
                             sharedPeriod, sharedMinPeriod, sharedFundamental,
                             sharedMaxPeriod);
                         escalationCause = EscalationCause::starved;
-                        escalationGapMs = 0.0;
+                        escalationGapMs = eventGapMs;
                         return LoopExit::escalate;
                     }
                 }
 
-                // Two stalls the buffer could not cover: pick the period from
-                // the largest of them so the next launch and the rest of this
-                // session stop glitching on the same length of stall.
-                if (riskyGapTriggered)
+                // A risky gap recorded on an event whose GetCurrentPadding or
+                // GetBuffer failed is decided here, on the first later event
+                // that gets this far, instead of being dropped.
+                if (riskyEscalationPending)
                 {
-                    escalationGapMs = riskyGapsWindow.largestWithin (eventSeconds);
-                    escalateToPeriod = PeriodPolicy::escalationTarget (
-                        escalationGapMs, (double) deviceSampleRate, bufferToPeriodRatio,
-                        sharedPeriod, sharedMinPeriod, sharedFundamental, sharedMaxPeriod);
-                    escalationCause = EscalationCause::riskyGap;
+                    riskyEscalationPending = false;
                     return LoopExit::escalate;
                 }
 
@@ -1709,10 +1760,53 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                 reader.setTargetFill (targetFrames);
                 backlogTargetFrames.store (targetFrames, std::memory_order_relaxed);
 
-                // Always fills all framesToRead frames: audio, or silence while
-                // the ring is priming after start-up or an underrun.
-                reader.read (*buffer, tempChannelPtrs.data(), deviceChannels,
-                             framesToRead, nominalRatio);
+                // Shared streams read up to the free space: what the ring can
+                // produce is released and the endpoint keeps whatever padding
+                // it still holds. Only when that padding could not reach the
+                // next event does the classic path run (the reader fades,
+                // counts the underrun and re-primes), because then the input
+                // has really stopped and a dry endpoint would feed the
+                // starvation escalation. Exclusive still writes the whole
+                // buffer, and a priming reader still fills the endpoint with
+                // silence up to the buffer end.
+                const bool wasPriming = reader.isPriming();
+                int producedFrames = framesToRead;
+                int framesReleased = framesToRead;
+
+                if (! wasPriming && mode != OutputMode::exclusive)
+                {
+                    producedFrames = reader.readUpTo (*buffer, tempChannelPtrs.data(),
+                                                      deviceChannels, framesToRead,
+                                                      nominalRatio);
+
+                    if (producedFrames < framesToRead)
+                        shortReadCount.store (++shortReads, std::memory_order_relaxed);
+                }
+                else
+                {
+                    reader.read (*buffer, tempChannelPtrs.data(), deviceChannels,
+                                 framesToRead, nominalRatio);
+                }
+
+                if (mode != OutputMode::exclusive)
+                {
+                    const auto fill = RenderFill::framesToRelease (
+                        framesToRead, (int) padding, producedFrames,
+                        keepAliveFrames, wasPriming);
+
+                    framesReleased = fill.frames;
+
+                    if (fill.fallbackToUnderrun)
+                    {
+                        // Not enough to reach the next event: the rest of the
+                        // event must be the fade and silence of a real
+                        // underrun, or the endpoint runs dry.
+                        reader.finishAsUnderrun (tempChannelPtrs.data(), deviceChannels,
+                                                 producedFrames, framesToRead);
+                        framesReleased = framesToRead;
+                    }
+                }
+
                 underrunCount.store (reader.getUnderrunCount(), std::memory_order_relaxed);
                 resyncCount.store (reader.getResyncCount(), std::memory_order_relaxed);
 
@@ -1726,7 +1820,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                 {
                     float* outputFloat = reinterpret_cast<float*> (data);
 
-                    for (int i = 0; i < framesToRead; ++i)
+                    for (int i = 0; i < framesReleased; ++i)
                         for (int ch = 0; ch < deviceChannels; ++ch)
                             outputFloat[i * deviceChannels + ch] =
                                 OutputCeiling::clamp (tempChannelPtrs[(size_t) ch][i]);
@@ -1735,7 +1829,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                 {
                     auto* outputPcm = reinterpret_cast<int16_t*> (data);
 
-                    for (int i = 0; i < framesToRead; ++i)
+                    for (int i = 0; i < framesReleased; ++i)
                         for (int ch = 0; ch < deviceChannels; ++ch)
                             outputPcm[i * deviceChannels + ch] =
                                 toPcm16 (OutputCeiling::clamp (tempChannelPtrs[(size_t) ch][i]));
@@ -1744,14 +1838,23 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                 {
                     auto* outputPcm = reinterpret_cast<int32_t*> (data);
 
-                    for (int i = 0; i < framesToRead; ++i)
+                    for (int i = 0; i < framesReleased; ++i)
                         for (int ch = 0; ch < deviceChannels; ++ch)
                             outputPcm[i * deviceChannels + ch] =
                                 toPcm24In32 (OutputCeiling::clamp (tempChannelPtrs[(size_t) ch][i]));
                 }
 
-                if (FAILED (renderClient->ReleaseBuffer (available, 0)))
+                // WASAPI allows releasing fewer frames than GetBuffer asked
+                // for; the rest stays free and the next event fills it.
+                if (FAILED (renderClient->ReleaseBuffer (framesReleased, 0)))
+                {
                     bufferErrorCount.store (++bufferErrors, std::memory_order_relaxed);
+                }
+                else
+                {
+                    paddingAfterLastWrite = juce::jmin ((int) bufferSize,
+                                                        (int) padding + framesReleased);
+                }
             }
             else if (result == WAIT_TIMEOUT)
             {
@@ -1821,7 +1924,7 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
             + ", buffer " + juce::String (oldBufferFrames) + " frames ("
             + juce::String (oldBufferMs, 2) + " ms) -> " + juce::String ((int) bufferSize)
             + " frames (" + juce::String (1000.0 * bufferSize / deviceSampleRate, 2) + " ms)"
-            + (byRiskyGap ? ", gap " + juce::String (triggerGapMs, 1) + " ms" : juce::String())
+            + ", gap " + juce::String (triggerGapMs, 1) + " ms"
             + " (starved=" + juce::String (starvedEventCount.load (std::memory_order_relaxed))
             + " risky=" + juce::String (riskyGapCount.load (std::memory_order_relaxed)) + ")");
 
