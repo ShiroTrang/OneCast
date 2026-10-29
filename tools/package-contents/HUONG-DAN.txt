@@ -226,11 +226,21 @@ sang "Nhẹ".
      cộng độ trễ do driver báo)
    - khâu khử ồn (Nhẹ ≈ 5 ms, AI ≈ 30 ms, Tắt = 0)
    - limiter (1 ms)
-   - đường ra CABLE Input (khoảng 1 chu kỳ thiết bị, thường 10 ms,
-     cộng vài ms)
-Ước tính thô với M-Track, buffer 128: chế độ "Nhẹ" khoảng 20 - 30
-ms; chuyển sang "AI" cộng thêm khoảng 25 ms (tổng khoảng 45 - 55
-ms). Độ trễ nằm bên trong VB-Cable và độ trễ mạng của Discord thì
+   - đường ra CABLE Input (bộ đệm của app và của CABLE, tự điều
+     chỉnh, xem đoạn dưới)
+Đo thực tế với M-Track, buffer 128: chế độ "Nhẹ" khoảng 29 ms;
+chuyển sang "AI" cộng thêm khoảng 25 ms (tổng khoảng 55 ms).
+
+Đường ra tự thích nghi: lần đầu chạy, OneCast dùng chu kỳ ngắn
+(khoảng 5 ms). Nếu máy có lúc bị khựng lâu hơn mức bộ đệm che được
+(thường do driver khác), app tự tăng chu kỳ để không rớt tiếng và
+nhớ mức đó cho các lần sau. Khi đó tổng độ trễ ở chế độ "Nhẹ" vào
+khoảng 37 - 46 ms. Việc này có chủ đích: rớt tiếng khó chịu hơn vài
+ms trễ. Muốn app học lại từ đầu (ví dụ sau khi đổi máy hay cài lại
+driver), thoát OneCast, mở %APPDATA%\OneCast\settings.json và đặt
+"outputPeriodHintFrames" về 0.
+
+Độ trễ nằm bên trong VB-Cable và độ trễ mạng của Discord thì
 OneCast không đo được. Số thật của máy bạn hiện ở dòng
 "Độ trễ ≈ ... ms". Khi nói chuyện trong Discord, 30 ms của khâu AI
 thường khó nhận ra; nhưng nếu bạn chơi game cần phản xạ nhanh hoặc

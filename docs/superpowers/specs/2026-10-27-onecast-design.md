@@ -148,9 +148,16 @@ ngưỡng đặt thấp được và ít cắt mất đầu/cuối chữ.
 
 - **Audio thread** (callback ASIO/WASAPI của JUCE): chạy toàn bộ DSP rồi ghi vào
   RingBuffer.
-- **Render thread** (WasapiOutputDevice, event-driven, COM MTA): đọc RingBuffer qua
-  DriftCompensatedReader rồi ghi ra CABLE Input. Backlog giữ nhỏ nhất có thể, như
-  LiveVocal: yêu cầu lớn nhất + 1 block engine + 2 ms.
+- **Render thread** (WasapiOutputDevice, event-driven, COM MTA, MMCSS "Pro Audio"):
+  đọc RingBuffer qua DriftCompensatedReader rồi ghi ra CABLE Input. Backlog giữ nhỏ
+  nhất có thể: 1 chu kỳ + 1.5 ms + 1 block engine, nở tạm khi endpoint đòi nhiều hơn
+  và co lại sau 5 s. Khi ring thiếu, ghi phần đang có (short read) thay vì chèn im lặng.
+  (Task 16-18.)
+- **Chu kỳ đường ra tự thích nghi** (Task 17-18): IAudioClient3 low-latency, khởi đầu ở
+  2 x chu kỳ nhỏ nhất của endpoint khi chưa học được gì. Lần đầu luồng ghi bị đánh thức
+  trễ hơn mức bộ đệm che được (sau 1 s đầu), app tăng chu kỳ lên mức che được khoảng
+  khựng đó cộng 20 %, lưu vào `outputPeriodHintFrames`; hết nấc thì dùng shared 10 ms
+  (lưu -1). Không tự hạ chu kỳ trong một phiên.
 - **Message thread**: UI (timer 30 Hz), watchdog thiết bị và phục hồi, lưu thiết
   lập (debounce), phím tắt toàn cục, khay hệ thống.
 
@@ -179,10 +186,12 @@ ngưỡng đặt thấp được và ít cắt mất đầu/cuối chữ.
 | ASIO buffer 128 mẫu (mặc định) | ≈ 2.7 ms + trễ driver báo |
 | Khử ồn AI / Nhẹ / Tắt | ≈ 30 ms / ≤ 6 ms / 0 |
 | Limiter | 1 ms |
-| Ring + WASAPI shared ra CABLE Input | ≈ 1 period thiết bị (thường 10 ms) + 2 ms |
+| Ring + endpoint CABLE Input | ≈ 16 ms ở chu kỳ 5.33 ms; 24-33 ms khi đã tăng lên ≈ 9 ms; ≈ 35 ms ở shared 10 ms |
 | Bên trong VB-Cable | theo cài đặt của VB-Cable, app không kiểm soát |
 
-App hiển thị: trễ vào do driver báo + trễ các khâu + backlog đầu ra hiện tại.
+App hiển thị: trễ vào do driver báo + trễ các khâu + backlog đầu ra đo được (ring +
+padding của endpoint). Đo thực tế với M-Track, chế độ Nhẹ: khoảng 29 ms ở chu kỳ
+5.33 ms, 37-46 ms khi máy hay khựng và chu kỳ đã tăng (Task 15, `docs/verification/`).
 
 ### 6.6 Thiết bị: mặc định và phục hồi
 
