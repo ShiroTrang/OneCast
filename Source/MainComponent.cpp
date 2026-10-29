@@ -14,6 +14,14 @@ namespace
     constexpr double clipBannerDurationMs    = 5000.0;
     constexpr double deviceListRefreshDelayMs = 1000.0;
 
+    /// Waits after a failed output start, then every 8 s while the endpoint is
+    /// still listed. A dead stream can recover without any endpoint event, so
+    /// waiting for one would leave the banner up forever.
+    constexpr double outputRetryDelaysMs[] = { 2000.0, 3000.0, 5000.0, 8000.0 };
+    constexpr int    outputRetrySteps = (int) (sizeof (outputRetryDelaysMs)
+                                               / sizeof (outputRetryDelaysMs[0]));
+    constexpr double outputRetryRepeatMs = 8000.0;
+
     juce::String outputNameForId (const std::vector<WasapiOutputDevice::DeviceInfo>& devices,
                                   const juce::String& id)
     {
@@ -370,12 +378,15 @@ void MainComponent::timerCallback()
     devicePanel.setRunning (engine.isDeviceOpen() && engine.isOutputRunning());
     devicePanel.setChannelCount (activeInputChannels());
 
-    // The render thread may have escalated to a larger period. Remember it
-    // through the normal debounced save, so the next launch starts there
-    // instead of learning the same lesson again.
+    // The render thread may have escalated to a larger period, or given up on
+    // the low-latency rung entirely (-1). Remember it through the normal
+    // debounced save, so the next launch starts there instead of learning the
+    // same lesson again.
     const int outputPeriodFrames = engine.getOutputPeriodFrames();
 
-    if (outputPeriodFrames > 0 && outputPeriodFrames != settings.outputPeriodHintFrames)
+    if ((outputPeriodFrames > 0
+         || outputPeriodFrames == WasapiOutputDevice::standardSharedPeriodHint)
+        && outputPeriodFrames != settings.outputPeriodHintFrames)
     {
         settings.outputPeriodHintFrames = outputPeriodFrames;
         settingsChanged();
@@ -410,6 +421,12 @@ void MainComponent::timerCallback()
     if (outputConfigured && ! outputDown
         && (! engine.isOutputRunning() || engine.hasOutputError()))
         markOutputLost();
+
+    // Retry a down output on its own clock: an endpoint can come back, or the
+    // stream can be restarted after a format change, without any notification
+    // this message loop ever sees.
+    if (outputDown && outputRetryDueMs > 0.0 && now >= outputRetryDueMs)
+        retryOutput();
 
     // One list refresh and one output retry per burst of endpoint
     // notifications, once Windows has been quiet for the settle time.
@@ -811,6 +828,8 @@ void MainComponent::chooseOutputDevice (bool allowCableFallback)
         engine.setOutputDevice ({});
         outputConfigured = false;
         outputDown = false;
+        outputRetryDueMs = 0.0;
+        outputRetryIndex = 0;
         cableMissing = true;
 
         if (newlyMissing)
@@ -829,6 +848,8 @@ void MainComponent::chooseOutputDevice (bool allowCableFallback)
     {
         outputConfigured = true;
         outputDown = false;
+        outputRetryDueMs = 0.0;
+        outputRetryIndex = 0;
 
         if (settings.outputDeviceId != chosenId || settings.outputDeviceName != chosenName)
         {
@@ -864,6 +885,8 @@ bool MainComponent::startOutput (const juce::String& id, const juce::String& nam
         engine.setOutputDevice ({});
         outputConfigured = false;
         outputDown = false;
+        outputRetryDueMs = 0.0;
+        outputRetryIndex = 0;
         return false;
     }
 
@@ -883,9 +906,11 @@ bool MainComponent::startOutput (const juce::String& id, const juce::String& nam
 
     if (! started)
     {
-        // The endpoint is still the desired one: an arrival retries it.
+        // The endpoint is still the desired one: keep trying it on a backoff,
+        // and let an arrival shorten that wait.
         outputConfigured = true;
         outputDown = true;
+        scheduleOutputRetry();
 
         showBanner (BannerKind::outputLost,
                     Strings::bannerOutputLost().replace ("%1", outputName),
@@ -897,6 +922,8 @@ bool MainComponent::startOutput (const juce::String& id, const juce::String& nam
 
     outputConfigured = true;
     outputDown = false;
+    outputRetryDueMs = 0.0;
+    outputRetryIndex = 0;
     cableMissing = false;
 
     StartupLog::mark ("output: started \"" + outputName + "\"");
@@ -911,6 +938,7 @@ void MainComponent::markOutputLost()
         return;
 
     outputDown = true;
+    scheduleOutputRetry();
 
     if (outputName.isEmpty())
         outputName = engine.getOutputDeviceId();
@@ -920,6 +948,85 @@ void MainComponent::markOutputLost()
                 AlertBanner::Severity::Critical);
 
     logDeviceEvent ("output lost: \"" + outputName + "\"");
+}
+
+void MainComponent::scheduleOutputRetry()
+{
+    const double now = juce::Time::getMillisecondCounterHiRes();
+
+    const double delay = outputRetryIndex < outputRetrySteps
+                           ? outputRetryDelaysMs[outputRetryIndex]
+                           : outputRetryRepeatMs;
+
+    if (outputRetryIndex < outputRetrySteps)
+        ++outputRetryIndex;
+
+    outputRetryDueMs = now + delay;
+}
+
+void MainComponent::retryOutput()
+{
+    outputRetryDueMs = 0.0;
+
+    if (! outputConfigured || ! outputDown)
+    {
+        outputRetryIndex = 0;
+        return;
+    }
+
+    // setOutputDevice() keeps the id even when the start failed, so this is
+    // the endpoint the banner is about.
+    const auto id = engine.getOutputDeviceId();
+
+    if (id.isEmpty())
+    {
+        outputRetryIndex = 0;
+        return;
+    }
+
+    // Only try while Windows still lists that endpoint. When it is gone the
+    // arrival path owns the retry; notifications can be unavailable (the
+    // hotplug registration failed), so the poll keeps running either way.
+    bool listed = false;
+
+    for (const auto& device : WasapiOutputDevice::getAvailableDevices())
+        if (device.id == id)
+        {
+            listed = true;
+            break;
+        }
+
+    if (! listed)
+    {
+        scheduleOutputRetry();
+        return;
+    }
+
+    bool started = false;
+    {
+        // start() waits for the render thread, so keep the timer and the
+        // device watch out of the middle of it.
+        const juce::ScopedValueSetter<bool> busy (deviceBusy, true);
+        engine.setOutputPeriodHintFrames (settings.outputPeriodHintFrames);
+        started = engine.setOutputDevice (id);
+    }
+
+    if (! started)
+    {
+        scheduleOutputRetry();
+        return;
+    }
+
+    outputDown = false;
+    outputRetryIndex = 0;
+    cableMissing = false;
+
+    if (outputName.isEmpty())
+        outputName = id;
+
+    StartupLog::mark ("output: recovered \"" + outputName + "\"");
+    dismissBanner (BannerKind::outputLost);
+    syncDevicePanelFromEngine();
 }
 
 //==============================================================================

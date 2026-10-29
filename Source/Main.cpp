@@ -3,6 +3,34 @@
 #include "UI/Theme.h"
 #include "Diagnostics/StartupLog.h"
 
+#include <Windows.h>
+
+namespace
+{
+    /// The app spends its life minimised in the tray. Windows 11 can then apply
+    /// EcoQoS to the process and throttle its timers, which is exactly what a
+    /// one-period audio render thread cannot survive: the wake-ups arrive late
+    /// and the endpoint runs dry. Opting out before any device opens is the
+    /// only reliable fix; StateMask = 0 means "disable these throttles", not
+    /// "enable them".
+    void optOutOfPowerThrottling()
+    {
+        PROCESS_POWER_THROTTLING_STATE state {};
+        state.Version     = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+                            | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        state.StateMask   = 0;
+
+        const BOOL ok = SetProcessInformation (GetCurrentProcess(), ProcessPowerThrottling,
+                                               &state, sizeof (state));
+
+        StartupLog::mark (ok ? "power: opted out of power throttling"
+                             : "power: power throttling opt-out failed ("
+                                   + juce::String ((int) GetLastError()) + ")");
+        StartupLog::flush();
+    }
+}
+
 class OneCastApplication : public juce::JUCEApplication,
                            private juce::Timer
 {
@@ -17,6 +45,10 @@ public:
 
     void initialise (const juce::String&) override
     {
+        // Before any device opens, so the render thread never starts under a
+        // throttle that Windows may only lift once the window is visible.
+        optOutOfPowerThrottling();
+
         bool testSignal = false;
         juce::String snapshotPath;
         int snapshotDelayMs = 2000;

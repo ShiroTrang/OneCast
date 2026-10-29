@@ -556,7 +556,10 @@ bool AudioEngine::setOutputDevice (const juce::String& endpointId)
 
 void AudioEngine::setOutputPeriodHintFrames (int frames) noexcept
 {
-    outputPeriodHintFrames_.store (juce::jmax (0, frames), std::memory_order_relaxed);
+    // -1 is the "standard shared rung" sentinel; any other negative is no hint.
+    outputPeriodHintFrames_.store (frames < WasapiOutputDevice::standardSharedPeriodHint
+                                     ? 0 : frames,
+                                   std::memory_order_relaxed);
 }
 
 int AudioEngine::getOutputPeriodFrames() const noexcept
@@ -668,6 +671,7 @@ juce::String AudioEngine::describeLatency() const
          + " mode=" + modeName
          + " period=" + juce::String (output_.getDevicePeriodMs(), 1) + " ms"
          + " periodFrames=" + juce::String (output_.getOutputPeriodFrames())
+         + " mmcss=" + (output_.isMmcssActive() ? "ok" : "failed")
          + " esc=" + juce::String (output_.getEscalationCount())
          + " late=" + juce::String (output_.getLateEventCount())
          + " maxGap=" + juce::String (output_.getMaxRenderGapMs(), 1) + " ms"

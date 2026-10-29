@@ -106,13 +106,14 @@ public:
     bool hasOutputError() const;
 
     /// The IAudioClient3 period that stayed glitch-free on the previous run,
-    /// in frames; 0 starts at the endpoint minimum. Set before the next
-    /// setOutputDevice() call. Thread-safe.
+    /// in frames; 0 starts at the endpoint minimum. -1 means the standard
+    /// shared rung is what works on this machine, so the low-latency rung is
+    /// skipped. Set before the next setOutputDevice() call. Thread-safe.
     void setOutputPeriodHintFrames (int frames) noexcept;
 
-    /// The period the cable stream is using now, in frames; 0 when no
-    /// low-latency stream is open. Stored in the settings so the next launch
-    /// starts where this machine settled.
+    /// The value to store in the settings for the next launch: the period the
+    /// cable stream is using now, -1 when it is on the standard shared rung,
+    /// 0 when nothing is open or it is exclusive.
     int getOutputPeriodFrames() const noexcept;
 
     // ------------------------------------------------------------------
@@ -152,7 +153,8 @@ public:
     float getTotalLatencyMs() const noexcept;
 
     /// Message-thread summary for the start-up log, e.g.
-    /// total=21.4 ms in=12.0 chain=6.3 out=3.1 mode=exclusive period=3.0 ms.
+    /// total=21.4 ms in=12.0 chain=6.3 out=3.1 mode=sharedLowLatency
+    /// period=3.0 ms mmcss=ok.
     juce::String describeLatency() const;
 
     int getOutputUnderrunCount() const noexcept;

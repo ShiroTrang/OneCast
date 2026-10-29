@@ -15,6 +15,15 @@
 /// smaller latency.
 struct PeriodPolicy
 {
+    /// The endpoint only accepts min + k * fundamental. A maximum that is not
+    /// on that grid (the engine may report one) is not a period the endpoint
+    /// will take, so align it down before it is used as a bound.
+    static int alignedMax (int minFrames, int fundamentalFrames, int maxFrames) noexcept
+    {
+        const long long steps = ((long long) maxFrames - minFrames) / fundamentalFrames;
+        return (int) ((long long) minFrames + steps * fundamentalFrames);
+    }
+
     /// Returns the smallest allowed period >= hintFrames (0 = no hint -> min).
     static int initialPeriod (int minFrames, int fundamentalFrames, int maxFrames,
                               int hintFrames) noexcept
@@ -24,17 +33,19 @@ struct PeriodPolicy
         if (minFrames < 1 || maxFrames < minFrames || fundamentalFrames <= 0)
             return std::max (1, minFrames);
 
+        const int highest = alignedMax (minFrames, fundamentalFrames, maxFrames);
+
         if (hintFrames <= minFrames)
             return minFrames;
 
-        if (hintFrames >= maxFrames)
-            return maxFrames;
+        if (hintFrames >= highest)
+            return highest;
 
         const long long span  = (long long) hintFrames - minFrames;
         const long long steps = (span + fundamentalFrames - 1) / fundamentalFrames;
         const long long period = (long long) minFrames + steps * fundamentalFrames;
 
-        return (int) std::min<long long> (period, maxFrames);
+        return (int) std::min<long long> (period, highest);
     }
 
     /// The next larger allowed period, or `current` when already at max.
@@ -44,7 +55,9 @@ struct PeriodPolicy
         if (minFrames < 1 || maxFrames < minFrames || fundamentalFrames <= 0)
             return std::max (1, minFrames);
 
-        if (current >= maxFrames)
+        const int highest = alignedMax (minFrames, fundamentalFrames, maxFrames);
+
+        if (current >= highest)
             return current;
 
         if (current < minFrames)
@@ -53,7 +66,7 @@ struct PeriodPolicy
         const long long steps = ((long long) current - minFrames) / fundamentalFrames + 1;
         const long long period = (long long) minFrames + steps * fundamentalFrames;
 
-        return (int) std::min<long long> (period, maxFrames);
+        return (int) std::min<long long> (period, highest);
     }
 
     /// Escalate when the endpoint starved at least `threshold` times within
