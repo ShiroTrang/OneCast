@@ -84,6 +84,30 @@ if (-not (Test-Path $exePath)) {
 Write-Ok ("exe: {0:N1} MB" -f ((Get-Item $exePath).Length / 1MB))
 
 # ---------------------------------------------------------------------------
+#  Refuse a build without ASIO
+# ---------------------------------------------------------------------------
+# The packaged exe is the one users run with an audio interface: a build with
+# ASIO disabled would silently fall back to Windows Audio and the M-Track's
+# low-latency path would be missing. CMake records the SDK path it was
+# configured with, so the cache is the honest source for this check.
+$cachePath = Join-Path $repoRoot 'build\CMakeCache.txt'
+
+if (-not (Test-Path -LiteralPath $cachePath)) {
+    throw "Build cache not found: $cachePath`nConfigure the build before packaging."
+}
+
+$asioEntry = Select-String -Path $cachePath -Pattern '^ASIO_SDK_PATH:[^=]*=(.*)$' |
+             Select-Object -First 1
+$asioPath = if ($asioEntry) { $asioEntry.Matches[0].Groups[1].Value.Trim() } else { '' }
+
+if ([string]::IsNullOrWhiteSpace($asioPath) -or -not (Test-Path -LiteralPath $asioPath -PathType Container)) {
+    throw "Refusing to package an exe built without ASIO support.`n" +
+          "ASIO_SDK_PATH in $cachePath is '$asioPath', which is not an existing directory.`n" +
+          "Re-configure with -DASIO_SDK_PATH=<Steinberg ASIO SDK> and rebuild."
+}
+Write-Ok "ASIO SDK: $asioPath"
+
+# ---------------------------------------------------------------------------
 #  Work out which Visual C++ runtime DLLs the exe actually needs
 # ---------------------------------------------------------------------------
 $vsRoots = Get-VsRoots
