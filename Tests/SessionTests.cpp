@@ -7,6 +7,7 @@
 
 #include <JuceHeader.h>
 
+#include "../Source/Audio/WasapiOutputDevice.h"
 #include "../Source/Dsp/DspParams.h"
 #include "../Source/Session/JsonFile.h"
 #include "../Source/Session/Settings.h"
@@ -338,15 +339,24 @@ public:
             // An explicitly empty hotkey means "none", not "use the default".
             expectEquals (SettingsIO::fromVar (juce::JSON::parse (R"({"muteHotkey": ""})")).muteHotkey, juce::String());
 
-            // The output period hint is a frame count: no hint is 0, and a
+            // The output period hint is a frame count: no hint is 0. -1 is the
+            // "standard shared rung" sentinel and must survive; any other
             // negative or non-numeric value is the same as no hint.
             expectEquals (SettingsIO::fromVar (juce::JSON::parse ("{}")).outputPeriodHintFrames, 0);
+            expectEquals (SettingsIO::fromVar (juce::JSON::parse (R"({"outputPeriodHintFrames": -1})"))
+                            .outputPeriodHintFrames, -1);
             expectEquals (SettingsIO::fromVar (juce::JSON::parse (R"({"outputPeriodHintFrames": -7})"))
                             .outputPeriodHintFrames, 0);
             expectEquals (SettingsIO::fromVar (juce::JSON::parse (R"({"outputPeriodHintFrames": "144"})"))
                             .outputPeriodHintFrames, 0);
             expectEquals (SettingsIO::fromVar (juce::JSON::parse (R"({"outputPeriodHintFrames": 1e308})"))
                             .outputPeriodHintFrames, 0);
+
+            // The sentinel round-trips through the file format too.
+            AppSettings sentinel;
+            sentinel.outputPeriodHintFrames = WasapiOutputDevice::standardSharedPeriodHint;
+            expectEquals (SettingsIO::fromVar (juce::JSON::parse (JsonFile::toText (SettingsIO::toVar (sentinel))))
+                            .outputPeriodHintFrames, -1);
 
             ScopedTempDir tmp;
             const auto file = tmp.dir.getChildFile ("settings.json");

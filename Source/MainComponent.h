@@ -104,6 +104,14 @@ private:
     bool startOutput (const juce::String& id, const juce::String& name);
     void markOutputLost();
 
+    /// While the output is down and its endpoint is still listed, try it
+    /// again with a widening backoff. A dead stream does not always come with
+    /// an endpoint notification (a format change in Sound settings, another
+    /// application grabbing the endpoint, an audio service restart), and a
+    /// failed DeviceHotplug::start() would leave the banner up forever.
+    void scheduleOutputRetry();
+    void retryOutput();
+
     // Recovery
     void watchAudioDevice();
     void audioDeviceLost (bool closeIt);
@@ -156,6 +164,10 @@ private:
     bool outputConfigured = false;
     bool outputDown = false;
     bool cableMissing = false;
+
+    // Automatic output retry: when it is due, and which backoff step is next.
+    double outputRetryDueMs = 0.0;
+    int outputRetryIndex = 0;
 
     double deviceListRefreshDueMs = 0.0;
     double clipBannerUntilMs = 0.0;

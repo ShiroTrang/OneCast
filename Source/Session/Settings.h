@@ -18,8 +18,9 @@ struct AppSettings
     juce::String muteHotkey { "Ctrl+Alt+M" };
 
     /// IAudioClient3 period that stayed glitch-free last run, in frames.
-    /// 0 = no hint, start at the endpoint minimum; negative and unreadable
-    /// values load as 0.
+    /// 0 = no hint, start at the endpoint minimum. -1 = this machine needs the
+    /// standard shared rung, so the low-latency rung is skipped. Any other
+    /// negative value (or an unreadable one) loads as 0.
     int outputPeriodHintFrames = 0;
 
     bool operator== (const AppSettings&) const = default;

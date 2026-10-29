@@ -57,10 +57,10 @@ namespace
         return static_cast<float> (std::clamp (d, -static_cast<double> (FLT_MAX), static_cast<double> (FLT_MAX)));
     }
 
-    /// A non-negative whole number, or `fallback`. JSON has one number type,
-    /// but a hand-edited file may hold a string or an overflow; neither may
-    /// become a nonsensical period.
-    int readNonNegativeInt (const juce::var& object, const char* key, int fallback)
+    /// The output period hint: -1 is a sentinel meaning "use the standard
+    /// shared rung", not an error. Any other negative, a non-number or an
+    /// overflow is no hint (0).
+    int readPeriodHint (const juce::var& object, const char* key, int fallback)
     {
         const auto v = object.getProperty (key, {});
 
@@ -69,8 +69,14 @@ namespace
 
         const auto d = static_cast<double> (v);
 
-        if (! std::isfinite (d) || d < 0.0 || d > (double) std::numeric_limits<int>::max())
+        if (! std::isfinite (d) || d > (double) std::numeric_limits<int>::max())
             return fallback;
+
+        if (d == -1.0)
+            return -1;
+
+        if (d < 0.0)
+            return 0;
 
         return (int) d;
     }
@@ -240,8 +246,8 @@ AppSettings fromVar (const juce::var& v)
     s.startWithWindows = readBool   (v, "startWithWindows", s.startWithWindows);
     s.startMinimized   = readBool   (v, "startMinimized",   s.startMinimized);
     s.muteHotkey       = readString (v, "muteHotkey",       s.muteHotkey);
-    s.outputPeriodHintFrames = readNonNegativeInt (v, "outputPeriodHintFrames",
-                                                   s.outputPeriodHintFrames);
+    s.outputPeriodHintFrames = readPeriodHint (v, "outputPeriodHintFrames",
+                                               s.outputPeriodHintFrames);
     s.params           = paramsFromVar (v.getProperty ("params", {}));
 
     return s;

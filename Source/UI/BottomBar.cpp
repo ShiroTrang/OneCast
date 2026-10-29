@@ -44,8 +44,10 @@ BottomBar::BottomBar (MainComponent& owner)
 
         if (settings.params.bypass != wanted)
         {
+            // Bypass is not part of a preset (Settings never stores it), so
+            // toggling it must not make the combo claim the sound left the
+            // preset. Same rule as mute just above.
             settings.params.bypass = wanted;
-            settings.presetName.clear();
             main.getEngine().setParams (settings.params);
             main.settingsChanged();
         }
