@@ -1,0 +1,27 @@
+# Build output
+build/
+build*/
+
+# Packaged distributables (regenerate with tools/package.ps1)
+dist/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# JUCE framework (copied from LiveVocal, not part of this repo)
+JUCE/
+
+# ASIO SDK (proprietary, not redistributable)
+ASIO_SDK/
+
+# Temp files
+*.raw
+*.tmp

@@ -1,0 +1,180 @@
+#pragma once
+#include <JuceHeader.h>
+
+#include "Audio/AudioEngine.h"
+#include "Audio/DeviceRecovery.h"
+#include "Platform/DeviceHotplug.h"
+#include "Platform/GlobalHotkey.h"
+#include "Session/Settings.h"
+#include "UI/AlertBanner.h"
+#include "UI/BottomBar.h"
+#include "UI/ChainPanel.h"
+#include "UI/DevicePanel.h"
+#include "UI/TrayIcon.h"
+
+#include <functional>
+#include <memory>
+
+/** The main window: device routing on top, the processing chain below.
+
+    Task 12 owns the device panel and the recovery logic ported from LiveVocal.
+    The chain area is a placeholder until Task 13, and the tray/hotkey live in
+    Task 14; the public API below is what those tasks build on.
+
+    Everything here runs on the message thread. The audio callback only ever
+    sees AudioEngine's atomics and its ring buffer.
+*/
+class MainComponent : public juce::Component,
+                      private juce::Timer,
+                      private DeviceHotplug::Listener
+{
+public:
+    MainComponent();
+    ~MainComponent() override;
+
+    AudioEngine& getEngine() noexcept;
+    AppSettings& getSettings() noexcept;
+
+    /// Marks the settings dirty; they are written one second after the last
+    /// change, so dragging a knob does not write the file on every step.
+    void settingsChanged();
+
+    /// Engine, settings and listeners in one call. Mute is deliberately not
+    /// persisted (Settings::paramsToVar leaves it out), so a restart never
+    /// starts silently muted.
+    void setMuted (bool muted);
+    bool isMuted() const;
+
+    /// Called on the message thread after setMuted(), for the tray icon.
+    std::function<void (bool muted)> onMuteChanged;
+
+    /// Wired by the application, because the window and the quit call belong
+    /// to it: the tray only reports what the user asked for.
+    std::function<void()> onShowWindow;
+    std::function<void()> onQuit;
+
+    /// Registers the shortcut typed in the options callout. False when the
+    /// text is not a valid combination or another application owns it; the
+    /// previously registered shortcut then stays in place.
+    bool applyMuteHotkey (const juce::String& text);
+
+    /// Whether Windows currently holds a mute shortcut for this process. The
+    /// settings keep the saved text even when launch registration failed, so
+    /// the options callout needs this to tell a working shortcut from a stale
+    /// line of text.
+    bool isMuteHotkeyRegistered() const noexcept;
+
+    void paint (juce::Graphics& g) override;
+    void resized() override;
+
+    /// The chain panel lives here so Task 14's tray and hotkey can refresh the
+    /// view after changing mute from outside the window.
+    ChainPanel& getChainPanel() noexcept;
+    BottomBar& getBottomBar() noexcept;
+
+private:
+    // Which alert is on screen, so recovering from one condition does not
+    // dismiss a different, still valid banner.
+    enum class BannerKind { none, inputLost, openFailed, outputLost, noCable, inputClip };
+
+    void timerCallback() override;
+
+    // DeviceHotplug::Listener (already dispatched to the message thread)
+    void deviceAdded (const juce::String& deviceId) override;
+    void deviceRemoved (const juce::String& deviceId) override;
+    void deviceStateChanged (const juce::String& deviceId, DWORD newState) override;
+    void defaultDeviceChanged (EDataFlow flow, ERole role, const juce::String& newDeviceId) override;
+
+    // DevicePanel callbacks
+    void audioApiChanged (const juce::String& typeName);
+    void inputDeviceChanged (const juce::String& name);
+    void inputChannelChanged (InputChannel channel);
+    void bufferSizeChanged (int samples);
+    void outputDeviceChanged (const juce::String& id);
+
+    // Device state
+    std::unique_ptr<juce::XmlElement> parseSavedDeviceState() const;
+    static juce::String inputNameFromState (const juce::XmlElement& state);
+    juce::String currentInputName();
+    int activeInputChannels();
+
+    void refreshDeviceLists();
+    void syncDevicePanelFromEngine();
+    void chooseOutputDevice (bool allowCableFallback);
+    bool startOutput (const juce::String& id, const juce::String& name);
+    void markOutputLost();
+
+    /// While the output is down and its endpoint is still listed, try it
+    /// again with a widening backoff. A dead stream does not always come with
+    /// an endpoint notification (a format change in Sound settings, another
+    /// application grabbing the endpoint, an audio service restart), and a
+    /// failed DeviceHotplug::start() would leave the banner up forever.
+    void scheduleOutputRetry();
+    void retryOutput();
+
+    // Recovery
+    void watchAudioDevice();
+    void audioDeviceLost (bool closeIt);
+    void handleUnexpectedDevice();
+    void tryReopenLostDevice();
+    void endpointArrived();
+    void endpointDeparted();
+    void scheduleDeviceListRefresh();
+
+    // Settings and banners
+    bool saveSettings();
+    void showBanner (BannerKind kind, const juce::String& message,
+                     AlertBanner::Severity severity);
+    void dismissBanner (BannerKind kind);
+    void logDeviceEvent (const juce::String& what);
+
+    // Tray, shortcut and options
+    void reconcileStartWithWindows();
+    void applySavedHotkey();
+    void showOptions();
+
+    //==========================================================================
+    AppSettings settings;
+    AudioEngine engine;
+    DevicePanel devicePanel;
+    AlertBanner alertBanner;
+    ChainPanel chainPanel   { *this };
+    BottomBar bottomBar     { *this };
+    DeviceHotplug deviceHotplug;
+    DeviceRecovery deviceRecovery;
+    TrayIcon trayIcon;
+    GlobalHotkey hotkey;
+
+    /// True only while Windows really holds a mute shortcut. It stays true
+    /// when a later edit is refused, because the old shortcut remains active.
+    bool hotkeyRegistered = false;
+
+    /// The device to bring back after an unplug, and what the output was called
+    /// for the banner while it is away.
+    std::unique_ptr<juce::XmlElement> lostDeviceState;
+    juce::String outputName;
+
+    bool settingsDirty = false;
+    double settingsSaveDueMs = 0.0;
+
+    /// Set while an ASIO driver may run the message loop; the timer must not
+    /// start a second reopen from inside the first one.
+    bool deviceBusy = false;
+
+    bool outputConfigured = false;
+    bool outputDown = false;
+    bool cableMissing = false;
+
+    // Automatic output retry: when it is due, and which backoff step is next.
+    double outputRetryDueMs = 0.0;
+    int outputRetryIndex = 0;
+
+    double deviceListRefreshDueMs = 0.0;
+    double clipBannerUntilMs = 0.0;
+
+    BannerKind currentBanner = BannerKind::none;
+
+    juce::Rectangle<int> chainArea;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
+};

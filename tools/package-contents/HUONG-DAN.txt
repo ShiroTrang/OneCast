@@ -1,0 +1,470 @@
+================================================================
+  OneCast - HƯỚNG DẪN CÀI ĐẶT & SỬ DỤNG
+  Bản Windows 64-bit (10 / 11)
+================================================================
+
+TÓM TẮT 5 BƯỚC (làm lần đầu)
+   1. Giải nén thư mục OneCast ra một chỗ cố định, mở OneCast.exe
+   2. Cài VB-Audio Virtual Cable (một lần), khởi động lại máy
+   3. Trong OneCast: chọn mic ở mục "Nguồn vào". Mục "Đầu ra"
+      phải là "CABLE Input (VB-Audio Virtual Cable)"
+   4. Trong Discord / OBS: chọn mic là "CABLE Output
+      (VB-Audio Virtual Cable)"
+   5. Trong Discord: tắt Noise Suppression (Krisp) để khỏi
+      khử ồn hai lần
+
+Chi tiết từng bước nằm ở các mục bên dưới.
+
+----------------------------------------------------------------
+1. ONECAST LÀM GÌ
+----------------------------------------------------------------
+OneCast lấy giọng từ mic của bạn, làm sạch và làm mượt giọng
+theo thời gian thực, rồi đưa ra một "mic ảo" (VB-Audio Virtual
+Cable). Discord, OBS, Zoom... chỉ cần chọn mic ảo đó là nhận
+được giọng đã xử lý.
+
+   Mic  ->  OneCast  ->  CABLE Input  ==>  CABLE Output
+                                              |
+                                  Discord / OBS / Zoom chọn
+                                  "CABLE Output" làm mic
+
+Các khâu xử lý, theo đúng thứ tự giọng đi qua:
+   Pre-gain -> Lọc trầm -> Khử ồn -> Gate -> EQ -> Compressor
+   -> De-esser -> Đầu ra (Gain ra + Limiter) -> MUTE
+
+Limiter ở cuối luôn bật và chặn mọi tiếng vượt quá -1 dBFS,
+nên giọng ra khỏi OneCast không bao giờ bị vỡ.
+
+Những thứ OneCast KHÔNG làm:
+   - Không phát giọng ra tai nghe của bạn (không có "nghe lại").
+     Muốn thử giọng, dùng Mic Test của Discord hoặc nhìn đồng
+     hồ "Ra" trong OneCast.
+   - Không đổi thiết bị mặc định của Windows. Tai nghe / loa của
+     bạn vẫn phát âm thanh Windows bình thường.
+   - Không cần quyền Administrator.
+
+----------------------------------------------------------------
+2. CÁCH CHẠY - KHÔNG CẦN CÀI ĐẶT GÌ
+----------------------------------------------------------------
+1. Giải nén TOÀN BỘ thư mục này ra một chỗ cố định,
+   ví dụ:  D:\OneCast
+
+   *** QUAN TRỌNG ***
+   Đừng chỉ copy mỗi file "OneCast.exe" ra ngoài. Các file .dll
+   đi kèm là thư viện runtime của Windows - thiếu chúng app sẽ
+   báo lỗi kiểu:
+       "The code execution cannot proceed because
+        MSVCP140.dll was not found"
+
+2. Double-click vào  "OneCast.exe"
+
+Windows có thể hiện cảnh báo xanh "Windows protected your PC"
+(SmartScreen) vì file chưa được ký số. Đây là cảnh báo mặc định
+cho mọi phần mềm nhỏ chưa mua chứng chỉ ký số, KHÔNG phải báo
+virus. Bấm:
+       "More info"  ->  "Run anyway"
+
+KHÔNG cần cài thêm gì cả:
+   - Không cần VC++ Redistributable (đã đóng gói kèm)
+   - Không cần .NET, Python, Java
+   - Không cần quyền Administrator
+
+Chỉ có MỘT thứ bạn phải tự cài: VB-Audio Virtual Cable (mục 3).
+
+Lưu ý: nên để thư mục OneCast ở chỗ cố định. Nếu bạn bật "Chạy
+cùng Windows" (mục 11) rồi sau đó di chuyển hoặc xoá thư mục,
+Windows sẽ không tìm thấy app nữa.
+
+Mở OneCast lần thứ hai không tạo cửa sổ mới: app đưa cửa sổ đang
+chạy lên trước.
+
+----------------------------------------------------------------
+3. CÀI VB-AUDIO VIRTUAL CABLE (làm một lần)
+----------------------------------------------------------------
+VB-Cable là một "dây cáp ảo": thứ gì phát vào đầu "CABLE Input"
+thì thu lại được ở đầu "CABLE Output". OneCast phát giọng vào
+CABLE Input; Discord / OBS thu từ CABLE Output.
+
+1. Vào https://vb-audio.com/Cable và tải bản "VB-CABLE Driver"
+   (file .zip).
+2. Giải nén ra một thư mục riêng.
+3. Chuột phải  VBCABLE_Setup_x64.exe  ->  "Run as administrator"
+   (chỉ bước cài driver này cần quyền Administrator, OneCast thì
+   không) -> bấm "Install Driver".
+4. KHỞI ĐỘNG LẠI MÁY. Không khởi động lại thì thiết bị mới
+   thường chưa hiện ra.
+
+Kiểm tra: chuột phải biểu tượng loa ở thanh taskbar -> "Sound
+settings" (Cài đặt âm thanh). Bạn phải thấy:
+   - "CABLE Input (VB-Audio Virtual Cable)"  trong danh sách
+     thiết bị phát (output)
+   - "CABLE Output (VB-Audio Virtual Cable)" trong danh sách
+     thiết bị thu (input)
+
+ĐỪNG đặt CABLE Input làm thiết bị phát mặc định của Windows.
+Nếu làm vậy, mọi âm thanh Windows (nhạc, game, tiếng bạn bè)
+sẽ chui vào cáp ảo và bạn sẽ không nghe thấy gì. Cứ để tai nghe
+hoặc loa của bạn là mặc định như trước.
+
+Mẹo nhỏ: mở bảng Sound cổ điển (Win+R, gõ  mmsys.cpl). Tab
+"Recording" -> CABLE Output -> Properties -> Advanced, đặt
+"Default Format" là 48000 Hz. Làm tương tự cho CABLE Input ở tab
+"Playback". OneCast làm việc ở 48 kHz nên cấu hình này ít bị lỗi
+nhất.
+
+Nếu chưa cài VB-Cable, OneCast vẫn mở được nhưng hiện thanh
+cảnh báo "Không tìm thấy CABLE Input..." và im lặng (nó không
+bao giờ phát bừa ra loa / tai nghe của bạn).
+
+----------------------------------------------------------------
+4. CHỌN NGUỒN VÀO VÀ ĐẦU RA TRONG ONECAST
+----------------------------------------------------------------
+Thanh trên cùng của OneCast có mục "Nguồn vào" và mục "Đầu ra".
+
+MIC DYNAMIC / XLR QUA M-AUDIO M-TRACK SOLO (dùng ASIO - khuyên dùng)
+   Lần chạy đầu, nếu máy có driver "M-Audio M-Track Solo and Duo
+   ASIO", OneCast tự chọn sẵn như sau. Nếu app chọn khác, tự chỉnh:
+
+      Kiểu     :  ASIO
+      Thiết bị :  M-Audio M-Track Solo and Duo ASIO
+      Kênh     :  Kênh 1   (cổng combo XLR / jack số 1)
+      Buffer   :  128 (mặc định; thử 64 nếu máy chạy ổn, tăng
+                  lên 256 nếu nghe tiếng lụp bụp)
+
+   Các lựa chọn khác của "Kênh": "Kênh 2" dùng khi mic cắm ở cổng 2;
+   "Trộn 1+2" lấy trung bình âm thanh của cả hai cổng.
+
+   Lưu ý: ASIO chỉ cho MỘT app dùng driver tại một thời điểm.
+   Nếu thấy thông báo "Không mở được ...", hãy đóng app đang giữ
+   M-Track (phần mềm thu âm / DAW, LiveVocal, bảng điều khiển
+   M-Track...) rồi chọn lại thiết bị.
+
+MIC USB, HOẶC MỌI MIC WINDOWS NHÌN THẤY (dùng Windows Audio)
+      Kiểu     :  Windows Audio
+      Thiết bị :  chọn mic của bạn trong danh sách
+      Kênh     :  Kênh 1 (mic USB thường là mono)
+
+   OneCast chỉ MỞ CHIỀU THU của mic. Danh sách không có "CABLE
+   Output" - cố ý ẩn đi để bạn khỏi vô tình thu lại chính tiếng
+   mình ra (gây hú / vọng).
+
+ĐẦU RA
+   Mục "Đầu ra" mặc định là "CABLE Input (VB-Audio Virtual
+   Cable)". Giữ nguyên như vậy khi dùng với Discord / OBS. Bạn
+   có thể chọn thiết bị khác (ví dụ Voicemeeter Input) nếu biết
+   mình đang làm gì.
+
+OneCast KHÔNG tự đổi sang mic khác. Nếu mic đã chọn bị rút ra
+hoặc biến mất, app hiện thanh cảnh báo và chờ nó cắm lại, rồi tự
+kết nối lại. Nó sẽ không âm thầm chuyển sang mic mặc định của
+Windows (tránh trường hợp bạn tưởng đang dùng mic xịn mà thực ra
+đang nói vào mic laptop).
+
+Thanh trên cùng còn có dòng "Độ trễ ≈ ... ms": tổng độ trễ mà
+OneCast biết được (xem mục 7).
+
+----------------------------------------------------------------
+5. DÙNG TRONG DISCORD
+----------------------------------------------------------------
+1. Mở OneCast và để nó chạy (có thể thu nhỏ xuống khay).
+2. Trong Discord:  User Settings (bánh răng)  ->
+   Voice & Video
+3. Mục  Input Device  ->  chọn
+       CABLE Output (VB-Audio Virtual Cable)
+   Mục  Output Device  để nguyên là tai nghe / loa của bạn.
+4. TẮT khử ồn của Discord:
+       Noise Suppression  ->  chọn  "None"  (tắt Krisp)
+   Nếu có mục  "Automatic Gain Control"  cũng nên tắt.
+   Lý do: OneCast đã khử ồn và nén giọng rồi. Để Krisp chạy chồng
+   lên sẽ khử ồn HAI LẦN, giọng dễ bị méo kiểu "robot" và mất
+   đầu / cuối chữ.
+5. Bấm  "Let's Check" (Mic Test)  để thử. Thanh nhảy khi bạn nói
+   là đúng.
+
+(Tên các mục có thể hơi khác nếu Discord của bạn để tiếng Việt,
+nhưng vị trí vẫn là phần cài đặt giọng nói / video.)
+
+----------------------------------------------------------------
+6. DÙNG TRONG OBS
+----------------------------------------------------------------
+Cách 1 - thêm như một nguồn âm thanh (khuyên dùng):
+   1. Ở khung  Sources  bấm  "+"  ->  "Audio Input Capture"
+   2. Đặt tên, bấm OK
+   3. Mục  Device  ->  chọn
+          CABLE Output (VB-Audio Virtual Cable)
+
+Cách 2 - đặt làm mic mặc định của OBS:
+   Settings  ->  Audio  ->  "Mic/Auxiliary Audio"  ->
+   chọn  CABLE Output (VB-Audio Virtual Cable)
+
+Nhớ: đừng thêm bộ lọc "Noise Suppression" của OBS lên nguồn này
+(trừ khi bạn thật sự muốn khử ồn lần hai).
+
+----------------------------------------------------------------
+7. CÁC CHẾ ĐỘ KHỬ ỒN
+----------------------------------------------------------------
+Thẻ "Khử ồn" có ba chế độ:
+
+   Nhẹ    Lọc phổ nhẹ, nhanh. Độ trễ khoảng 5 ms. Đây là chế độ
+          MẶC ĐỊNH: giọng tự nhiên, phản hồi nhanh, hợp khi phòng
+          đã khá yên và bạn muốn độ trễ thấp nhất.
+
+   AI     Khử ồn bằng mạng nơ-ron (RNNoise). Mạnh hơn "Nhẹ": bỏ
+          được tiếng quạt, bàn phím, điều hoà, tiếng ồn nền...
+          Đổi lại độ trễ cao hơn, khoảng 30 ms. Chọn AI khi phòng
+          ồn (hoặc chọn preset "Phòng ồn", preset này dùng AI).
+
+   Tắt    Không khử ồn. Không thêm độ trễ nào.
+
+Thanh "Mức" (0 - 100 %) trộn giữa giọng gốc và giọng đã khử ồn.
+100 % là khử hết cỡ. Nếu thấy giọng bị méo kiểu "robot" hay nuốt
+chữ (hay gặp ở chế độ AI), hạ "Mức" xuống 70 - 80 % hoặc đổi
+sang "Nhẹ".
+
+Độ trễ tổng (số hiện ở "Độ trễ ≈ ... ms" trên thanh trên cùng) gồm:
+   - buffer của ASIO / Windows Audio (128 mẫu ở 48 kHz ≈ 2,7 ms,
+     cộng độ trễ do driver báo)
+   - khâu khử ồn (Nhẹ ≈ 5 ms, AI ≈ 30 ms, Tắt = 0)
+   - limiter (1 ms)
+   - đường ra CABLE Input (bộ đệm của app và của CABLE, tự điều
+     chỉnh, xem đoạn dưới)
+Đo thực tế với M-Track, buffer 128: chế độ "Nhẹ" khoảng 29 ms;
+chuyển sang "AI" cộng thêm khoảng 25 ms (tổng khoảng 55 ms).
+
+Đường ra tự thích nghi: lần đầu chạy, OneCast dùng chu kỳ ngắn
+(khoảng 5 ms). Nếu máy có lúc bị khựng lâu hơn mức bộ đệm che được
+(thường do driver khác), app tự tăng chu kỳ để không rớt tiếng và
+nhớ mức đó cho các lần sau. Khi đó tổng độ trễ ở chế độ "Nhẹ" vào
+khoảng 37 - 46 ms. Việc này có chủ đích: rớt tiếng khó chịu hơn vài
+ms trễ. Muốn app học lại từ đầu (ví dụ sau khi đổi máy hay cài lại
+driver), thoát OneCast, mở %APPDATA%\OneCast\settings.json và đặt
+"outputPeriodHintFrames" về 0.
+
+Độ trễ nằm bên trong VB-Cable và độ trễ mạng của Discord thì
+OneCast không đo được. Số thật của máy bạn hiện ở dòng
+"Độ trễ ≈ ... ms". Khi nói chuyện trong Discord, 30 ms của khâu AI
+thường khó nhận ra; nhưng nếu bạn chơi game cần phản xạ nhanh hoặc
+thấy lệch tiếng, hãy ở lại "Nhẹ".
+
+Đổi chế độ khử ồn khi đang chạy được, app chuyển mượt nên không
+có tiếng "bụp".
+
+----------------------------------------------------------------
+8. CÁC THẺ XỬ LÝ KHÁC, PRESET VÀ BYPASS
+----------------------------------------------------------------
+Hầu hết các thẻ có công tắc bật / tắt riêng (Pre-gain và Đầu ra
+luôn bật; Khử ồn chọn Tắt / Nhẹ / AI) và vài núm chỉnh. Bấm đúp vào
+một núm để đưa nó về giá trị mặc định; bấm vào số dưới núm để gõ
+một giá trị chính xác.
+
+   Pre-gain     Khuếch đại giọng ngay sau cổng vào (mặc định
+                +6 dB). Mic dynamic thường nhỏ tiếng nên cần.
+   Lọc trầm     Cắt tiếng ù, rung, gió phả vào mic ở dưới ~80 Hz.
+   Khử ồn       Xem mục 7.
+   Gate         Tự hạ tiếng khi bạn ngừng nói. Núm "Ngưỡng": càng
+                cao càng cắt mạnh. Gate đặt SAU khử ồn nên ít cắt
+                mất đầu / cuối chữ.
+   EQ           "Đục" bớt ù đục, "Rõ" thêm độ rõ chữ, "Sáng" thêm
+                độ sáng cho giọng.
+   Compressor   Nén chênh lệch to / nhỏ. "Ngưỡng", "Tỉ lệ", "Bù"
+                (bù lại âm lượng sau khi nén).
+   De-esser     Giảm tiếng "s", "x" chói tai ("Mức").
+   Đầu ra       Thẻ cuối cùng: "Gain ra" và đồng hồ Limiter.
+                Limiter luôn bật, không tắt được: trần -1 dBFS.
+
+PRESET (thanh dưới cùng, mục "Preset")
+   Tự nhiên    Mặc định. Nén nhẹ, EQ nhẹ, giọng gần như gốc.
+   Phòng ồn    Dùng chế độ khử ồn AI và gate ngưỡng cao hơn, hợp
+               phòng nhiều tiếng ồn nền (quạt, bàn phím, đường
+               phố...). Chọn preset này thì độ trễ tăng khoảng
+               25 ms so với "Nhẹ".
+   Phát thanh  Nén mạnh hơn, giọng rõ hơn, De-esser mạnh hơn:
+               giọng "đài phát thanh".
+   Chọn preset xong vẫn chỉnh tay được. Chỉnh xong muốn giữ thì
+   bấm "Lưu preset" và đặt tên (không trùng tên preset có sẵn).
+   Bấm "Xoá preset" để xoá preset do bạn tự lưu. Preset có sẵn
+   chỉ đọc, không xoá được.
+
+BYPASS (thanh dưới cùng)
+   Bấm "Bypass" để so sánh A/B: bỏ qua mọi khâu từ Lọc trầm tới
+   De-esser, nghe được giọng "gốc". Pre-gain, Gain ra, Limiter và
+   MUTE vẫn chạy, nên giọng vẫn không bị vỡ. Độ trễ của khâu khử
+   ồn biến mất khi bật Bypass, và hiện lại khi tắt.
+
+----------------------------------------------------------------
+9. ĐÈN CLIP VÀ GAIN CỦA M-TRACK
+----------------------------------------------------------------
+Cạnh đồng hồ "Vào" ở thanh dưới có một đèn clip. Nếu đèn sáng,
+hoặc app hiện thanh cảnh báo:
+
+     "Mic vào quá to (bị vỡ ngay ở phần cứng).
+      Vặn nhỏ gain trên M-Track."
+
+thì tín hiệu đã bị vỡ ngay tại bộ chuyển đổi của M-Track, trước
+khi vào phần mềm. Phần mềm KHÔNG cứu được tiếng đã vỡ ở phần
+cứng. Cách xử lý:
+
+   1. Vặn núm GAIN trên M-Track Solo xuống một chút.
+   2. Nói thật to / hét thử. Nếu đèn clip vẫn sáng, vặn xuống nữa.
+   3. Nếu giọng đã quá nhỏ sau khi vặn xuống, đừng vặn lại gain
+      phần cứng: hãy tăng "Pre-gain" (hoặc "Gain ra") trong
+      OneCast. Tăng bằng phần mềm thì không gây vỡ ở phần cứng.
+
+----------------------------------------------------------------
+10. MUTE VÀ PHÍM TẮT
+----------------------------------------------------------------
+Có ba cách tắt / bật tiếng:
+   - Nút "MUTE" lớn ở thanh dưới cùng
+   - Phím tắt toàn cục:  Ctrl+Alt+M
+     (hoạt động cả khi bạn đang chơi game hay đang ở app khác;
+      bấm lần nữa để bật tiếng lại)
+   - Menu chuột phải trên biểu tượng khay: "Tắt tiếng" / "Bật tiếng"
+
+Khi đang tắt tiếng, app hiện "ĐANG TẮT TIẾNG" và biểu tượng khay
+chuyển sang màu xám. Tắt / bật được làm mượt trong khoảng
+10 ms nên không có tiếng "bụp".
+
+Đổi phím tắt: bấm nút "Tuỳ chọn" (hình bánh răng, thanh trên
+cùng), gõ phím tắt mới vào ô "Phím tắt Mute", ví dụ  Ctrl+Alt+F9
+rồi nhấn Enter. Phím tắt cần ít nhất một phím bổ trợ (Ctrl, Alt,
+Shift hoặc Win) cộng một phím chính (A-Z, 0-9, F1-F24, Pause,
+ScrollLock, Insert, Home, End, PageUp, PageDown).
+Nếu app báo "Phím tắt không hợp lệ hoặc đã bị app khác dùng", tổ
+hợp cũ vẫn được giữ; hãy thử tổ hợp khác.
+Đừng dùng Ctrl+Shift+M: Discord đã dùng tổ hợp đó.
+
+----------------------------------------------------------------
+11. KHAY HỆ THỐNG, CHẠY CÙNG WINDOWS
+----------------------------------------------------------------
+KHAY HỆ THỐNG
+   Bấm nút đóng (X) của cửa sổ KHÔNG thoát app: OneCast ẩn xuống
+   khay hệ thống (góc phải thanh taskbar) và vẫn tiếp tục xử lý
+   giọng cho Discord / OBS. Nếu không thấy biểu tượng, bấm mũi tên
+   "^" cạnh đồng hồ.
+      - Chuột trái vào biểu tượng:  mở lại cửa sổ
+      - Chuột phải vào biểu tượng:  menu "Hiện OneCast",
+        "Tắt tiếng" / "Bật tiếng", "Thoát"
+   Muốn thoát hẳn: chuột phải biểu tượng khay -> "Thoát".
+   (Thoát thì Discord sẽ không còn nhận được giọng nữa.)
+
+CHẠY CÙNG WINDOWS
+   Bấm "Tuỳ chọn" (bánh răng, thanh trên cùng):
+      "Chạy cùng Windows"   OneCast tự mở khi bạn đăng nhập
+                            Windows (mặc định: tắt). Khi tự mở,
+                            app khởi động ở dạng thu nhỏ trong
+                            khay.
+      "Khởi động thu nhỏ"   Mỗi lần mở OneCast, app ẩn ngay xuống
+                            khay thay vì hiện cửa sổ.
+   Tính năng "Chạy cùng Windows" chỉ ghi vào mục khởi động của
+   TÀI KHOẢN BẠN (không cần Administrator, không đụng tới hệ
+   thống). Tắt lại bằng chính công tắc đó.
+
+----------------------------------------------------------------
+12. DỮ LIỆU LƯU Ở ĐÂU
+----------------------------------------------------------------
+Mọi thứ nằm trong:   %APPDATA%\OneCast\
+
+   settings.json      thiết bị đã chọn, mọi thông số, tuỳ chọn,
+                      phím tắt (tự lưu, sửa bằng Notepad được)
+   Presets\*.json     các preset do bạn tự lưu
+   startup.log        thời gian khởi động từng bước, thiết bị đã
+                      mở, tốc độ lấy mẫu
+
+Muốn xem nhanh: mở hộp thoại Run (Win+R), dán
+   %APPDATA%\OneCast
+rồi Enter.
+
+Muốn đưa preset sang máy bạn bè: copy file .json trong Presets\
+sang cùng thư mục trên máy kia.
+
+----------------------------------------------------------------
+13. GỠ CÀI ĐẶT
+----------------------------------------------------------------
+BẢN GIẢI NÉN (ZIP):
+   1. Mở "Tuỳ chọn" và TẮT "Chạy cùng Windows" (nếu đã bật).
+   2. Thoát OneCast hẳn (khay -> chuột phải -> "Thoát").
+   3. Xoá thư mục OneCast.
+   Muốn xoá sạch hoàn toàn thì xoá thêm  %APPDATA%\OneCast
+   (mất cả thiết lập lẫn preset tự lưu).
+
+BẢN CÀI ĐẶT (file ...-Setup.exe):
+   Start Menu > "Go OneCast". Trình gỡ sẽ đóng app, xoá chương
+   trình, shortcut, mục "Chạy cùng Windows" VÀ dữ liệu trong
+   %APPDATA%\OneCast. Muốn giữ preset thì copy thư mục Presets
+   ra chỗ khác trước.
+
+VB-Audio Virtual Cable là phần mềm riêng. Muốn gỡ thì gỡ trong
+Settings > Apps, hoặc dùng trình cài của VB-Cable (nút
+"Remove Driver").
+
+----------------------------------------------------------------
+14. XỬ LÝ SỰ CỐ
+----------------------------------------------------------------
+[Không mở được, báo thiếu MSVCP140.dll / VCRUNTIME140.dll]
+   -> Bạn chưa giải nén đủ các file .dll đi kèm exe.
+      Giải nén lại toàn bộ thư mục, giữ nguyên các file cạnh nhau.
+
+[Thanh cảnh báo "Không tìm thấy CABLE Input..."]
+   -> Chưa cài VB-Audio Virtual Cable, hoặc cài rồi mà chưa khởi
+      động lại máy. Xem mục 3. Sau khi cài, mở lại OneCast.
+
+[Discord / OBS không nghe thấy giọng]
+   -> Trong OneCast: nhìn đồng hồ "Vào". Nếu không nhúc nhích thì
+      mic chưa đúng (mục 4). Nếu "Vào" nhảy mà "Ra" không nhảy,
+      kiểm tra OneCast có đang MUTE ("ĐANG TẮT TIẾNG") không.
+   -> Mục "Đầu ra" phải là CABLE Input (VB-Audio Virtual Cable).
+   -> Trong Discord / OBS: mic phải là CABLE Output, KHÔNG phải
+      CABLE Input.
+   -> OneCast phải đang chạy (kể cả khi ẩn xuống khay). Bấm X
+      không thoát app, nhưng bấm "Thoát" ở menu khay thì có.
+   -> Trong Windows Sound settings, kiểm tra CABLE Output không
+      bị tắt tiếng và âm lượng không bằng 0.
+
+[Thanh cảnh báo "Không mở được ..." khi chọn mic ASIO]
+   -> Một app khác đang giữ driver ASIO (phần mềm thu âm / DAW,
+      LiveVocal, bảng điều khiển M-Track...). Đóng chúng đi rồi
+      chọn lại thiết bị trong OneCast.
+
+[Tiếng bị vỡ, rè, lụp bụp, giật]
+   -> Tăng "Buffer" (ví dụ 128 -> 256).
+   -> Đóng bớt app nặng đang chạy cùng.
+   -> Xem phần đèn clip ở mục 9 để biết vỡ tiếng có phải do gain
+      phần cứng quá lớn không.
+   -> Đặt CABLE Input / CABLE Output cùng 48000 Hz (mục 3).
+
+[Giọng bị "robot", nuốt chữ, mất đầu / cuối câu]
+   -> Có thể Discord đang bật Noise Suppression (Krisp) chồng lên
+      OneCast. Tắt nó đi (mục 5).
+   -> Hạ "Mức" của Khử ồn xuống 70 - 80 %, hoặc đổi sang "Nhẹ"
+      nếu đang dùng "AI".
+   -> Hạ "Ngưỡng" của Gate xuống một chút.
+
+[Vẫn còn tiếng ồn nền (quạt, bàn phím...) lọt vào giọng]
+   -> Đổi "Khử ồn" từ "Nhẹ" sang "AI", hoặc chọn preset
+      "Phòng ồn". Bù lại độ trễ tăng thêm khoảng 25 ms.
+   -> Nâng "Ngưỡng" của Gate lên một chút.
+
+[Giọng quá nhỏ]
+   -> Tăng "Pre-gain". Mic dynamic cần nhiều gain. Nếu cần nhiều
+      hơn nữa thì tăng "Gain ra". Đồng hồ "Ra" không bao giờ vượt
+      quá -1 dBFS nhờ limiter.
+
+[Rút mic / rút M-Track khi đang chạy]
+   -> Bình thường. App hiện cảnh báo và chờ; cắm lại là tự nối
+      lại, không cần mở lại app.
+
+[Không thấy cửa sổ OneCast nhưng app đang chạy]
+   -> Nó đang ở khay hệ thống (bấm "^" cạnh đồng hồ nếu không
+      thấy biểu tượng). Chuột trái vào biểu tượng, hoặc mở
+      OneCast.exe lần nữa, cửa sổ sẽ hiện lên.
+
+[Phím tắt Mute không chạy]
+   -> Có thể app khác đang dùng tổ hợp đó. Đổi phím trong
+      "Tuỳ chọn" (mục 10).
+
+[App khởi động chậm vài giây]
+   -> Bình thường nếu máy có nhiều driver ASIO (ASIO4ALL,
+      Voicemeeter, Realtek ASIO...). App phải dò qua hết.
+   -> Xem chi tiết từng bước trong %APPDATA%\OneCast\startup.log
+
+================================================================

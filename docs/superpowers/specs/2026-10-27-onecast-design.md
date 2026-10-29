@@ -37,8 +37,8 @@ compressor, gate, de-esser được chỉnh theo giọng nói.
    (ví dụ Voicemeeter Input).
 4. **Không vỡ tiếng**: không mẫu nào ra khỏi app vượt -1 dBFS.
 5. **Độ trễ thấp nhất có thể**. App hiển thị tổng độ trễ mà nó biết được.
-6. **Khử ồn hai chế độ**: AI (RNNoise, khoảng 20 ms) và Nhẹ (lọc phổ, ≤ 6 ms).
-   **Mặc định: AI** (người dùng đã chọn).
+6. **Khử ồn hai chế độ**: AI (RNNoise, khoảng 30 ms) và Nhẹ (lọc phổ, ≤ 6 ms).
+   **Mặc định: Nhẹ** (người dùng đổi lại sau khi đo được AI trễ 30 ms). AI vẫn chọn được.
 7. Lưu và khôi phục toàn bộ thiết lập. Có preset sẵn và preset người dùng tự lưu.
 8. Tự phục hồi khi rút/cắm mic hoặc interface, và khi CABLE Input mất hoặc trở lại.
 9. Tiện ích: phím tắt Mute toàn cục, nút Bypass để so sánh A/B, đồng hồ đo kèm đèn
@@ -116,7 +116,7 @@ Pre-gain           mặc định +6 dB, dải -12..+24 dB
    ▼
 Lọc cắt trầm (HPF) mặc định 80 Hz, dải 40-200 Hz, dốc 12-18 dB/oct
    ▼
-Khử ồn             Tắt | Nhẹ (≤ 6 ms) | AI RNNoise (~20 ms)   [mặc định AI, mức 100%]
+Khử ồn             Tắt | Nhẹ (≤ 6 ms) | AI RNNoise (~30 ms)   [mặc định Nhẹ, mức 100%]
    ▼
 Noise gate mềm     downward expander, có hysteresis + hold, 0 ms
    ▼
@@ -148,9 +148,16 @@ ngưỡng đặt thấp được và ít cắt mất đầu/cuối chữ.
 
 - **Audio thread** (callback ASIO/WASAPI của JUCE): chạy toàn bộ DSP rồi ghi vào
   RingBuffer.
-- **Render thread** (WasapiOutputDevice, event-driven, COM MTA): đọc RingBuffer qua
-  DriftCompensatedReader rồi ghi ra CABLE Input. Backlog giữ nhỏ nhất có thể, như
-  LiveVocal: yêu cầu lớn nhất + 1 block engine + 2 ms.
+- **Render thread** (WasapiOutputDevice, event-driven, COM MTA, MMCSS "Pro Audio"):
+  đọc RingBuffer qua DriftCompensatedReader rồi ghi ra CABLE Input. Backlog giữ nhỏ
+  nhất có thể: 1 chu kỳ + 1.5 ms + 1 block engine, nở tạm khi endpoint đòi nhiều hơn
+  và co lại sau 5 s. Khi ring thiếu, ghi phần đang có (short read) thay vì chèn im lặng.
+  (Task 16-18.)
+- **Chu kỳ đường ra tự thích nghi** (Task 17-18): IAudioClient3 low-latency, khởi đầu ở
+  2 x chu kỳ nhỏ nhất của endpoint khi chưa học được gì. Lần đầu luồng ghi bị đánh thức
+  trễ hơn mức bộ đệm che được (sau 1 s đầu), app tăng chu kỳ lên mức che được khoảng
+  khựng đó cộng 20 %, lưu vào `outputPeriodHintFrames`; hết nấc thì dùng shared 10 ms
+  (lưu -1). Không tự hạ chu kỳ trong một phiên.
 - **Message thread**: UI (timer 30 Hz), watchdog thiết bị và phục hồi, lưu thiết
   lập (debounce), phím tắt toàn cục, khay hệ thống.
 
@@ -161,8 +168,9 @@ ngưỡng đặt thấp được và ít cắt mất đầu/cuối chữ.
   chuỗi vẫn chạy ở rate của thiết bị. Riêng khâu AI thì resample sang 48 kHz và
   ngược lại ngay trong khâu đó; độ trễ báo cáo phải tính cả phần resample.
   (Quyết định của orchestrator.)
-- **AI (RNNoise)**: gom khung 480 mẫu qua FIFO, thêm khoảng 960 mẫu trễ (≈ 20 ms ở
-  48 kHz). "Mức độ" 0-100% trộn tín hiệu khô (đã delay khớp pha) với tín hiệu ướt.
+- **AI (RNNoise)**: gom khung 480 mẫu qua FIFO, thêm 1440 mẫu trễ (≈ 30 ms ở
+  48 kHz: 480 mẫu gom khung + 960 mẫu trễ nội tại của RNNoise 0.2, vốn nhìn trước một
+  khung; đo thực tế ở Task 5). "Mức độ" 0-100% trộn tín hiệu khô (đã delay khớp pha) với tín hiệu ướt.
   Có thể dùng xác suất VAD của RNNoise để hỗ trợ gate (builder tự quyết).
 - **Nhẹ**: STFT ngắn (gợi ý FFT 256, hop 64, cửa sổ sqrt-Hann), ước lượng nhiễu
   thích ứng (minimum statistics hoặc MCRA), gain kiểu Wiener có làm mượt và mức giảm
@@ -176,12 +184,14 @@ ngưỡng đặt thấp được và ít cắt mất đầu/cuối chữ.
 | Khâu | Trễ |
 |---|---|
 | ASIO buffer 128 mẫu (mặc định) | ≈ 2.7 ms + trễ driver báo |
-| Khử ồn AI / Nhẹ / Tắt | ≈ 20 ms / ≤ 6 ms / 0 |
+| Khử ồn AI / Nhẹ / Tắt | ≈ 30 ms / ≤ 6 ms / 0 |
 | Limiter | 1 ms |
-| Ring + WASAPI shared ra CABLE Input | ≈ 1 period thiết bị (thường 10 ms) + 2 ms |
+| Ring + endpoint CABLE Input | ≈ 16 ms ở chu kỳ 5.33 ms; 24-33 ms khi đã tăng lên ≈ 9 ms; ≈ 35 ms ở shared 10 ms |
 | Bên trong VB-Cable | theo cài đặt của VB-Cable, app không kiểm soát |
 
-App hiển thị: trễ vào do driver báo + trễ các khâu + backlog đầu ra hiện tại.
+App hiển thị: trễ vào do driver báo + trễ các khâu + backlog đầu ra đo được (ring +
+padding của endpoint). Đo thực tế với M-Track, chế độ Nhẹ: khoảng 29 ms ở chu kỳ
+5.33 ms, 37-46 ms khi máy hay khựng và chu kỳ đã tăng (Task 15, `docs/verification/`).
 
 ### 6.6 Thiết bị: mặc định và phục hồi
 
@@ -229,7 +239,7 @@ orchestrator; Segoe UI hiển thị đủ dấu tiếng Việt).
 - Thiết lập lưu tự động vào `%APPDATA%\OneCast\settings.json` (thiết bị, mọi tham
   số, tuỳ chọn, phím tắt).
 - Preset có sẵn (chỉ đọc), builder tự tinh chỉnh con số:
-  - **Tự nhiên** (mặc định): AI 100%, compressor nhẹ (~3:1), EQ nhẹ.
+  - **Tự nhiên** (mặc định): Nhẹ 100%, compressor nhẹ (~3:1), EQ nhẹ.
   - **Phòng ồn**: AI 100%, gate ngưỡng cao hơn.
   - **Phát thanh**: compressor mạnh hơn, nâng rõ nhiều hơn, de-esser mạnh hơn.
 - Preset người dùng lưu thành JSON trong `%APPDATA%\OneCast\Presets\`.
