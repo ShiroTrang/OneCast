@@ -85,6 +85,11 @@ target_compile_definitions(OneCast PRIVATE
     JUCE_USE_WINRT_MIDI=0
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    # The app only reads and writes WAV, so the FLAC and Ogg Vorbis codecs
+    # (each with another bundled library and licence) are left out of the
+    # binary that ships.
+    JUCE_USE_FLAC=0
+    JUCE_USE_OGGVORBIS=0
     JUCE_DISPLAY_SPLASH_SCREEN=0
     NOMINMAX=1
     WIN32_LEAN_AND_MEAN=1
@@ -136,6 +141,8 @@ target_compile_definitions(OneCastTests PRIVATE
     JUCE_USE_WINRT_MIDI=0
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    JUCE_USE_FLAC=0
+    JUCE_USE_OGGVORBIS=0
     NOMINMAX=1
     WIN32_LEAN_AND_MEAN=1
     # Absolute, so the fixtures are found from any build directory, including
@@ -182,6 +189,8 @@ target_compile_definitions(OneCastProbe PRIVATE
     JUCE_USE_WINRT_MIDI=0
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    JUCE_USE_FLAC=0
+    JUCE_USE_OGGVORBIS=0
     NOMINMAX=1
     WIN32_LEAN_AND_MEAN=1
 )
@@ -221,6 +230,8 @@ target_compile_definitions(OneCastRender PRIVATE
     JUCE_USE_WINRT_MIDI=0
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    JUCE_USE_FLAC=0
+    JUCE_USE_OGGVORBIS=0
     NOMINMAX=1
     WIN32_LEAN_AND_MEAN=1
 )

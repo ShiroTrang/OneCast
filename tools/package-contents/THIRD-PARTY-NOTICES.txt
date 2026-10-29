@@ -24,11 +24,104 @@ Mã nguồn của dự án này:
    (Nếu bạn phát tán theo AGPLv3, hãy chắc chắn repo này là công
     khai và chứa đúng phiên bản mã nguồn đã dùng để build.)
 
-JUCE tự đóng gói sẵn vài thư viện nhỏ (ví dụ zlib, libpng,
-libjpeg, FLAC, Ogg Vorbis). Mỗi thư viện có giấy phép riêng,
-đều thuộc loại cho phép phát tán kèm ứng dụng. Chi tiết nằm
-trong mã nguồn JUCE, thư mục modules\juce_core,
-modules\juce_graphics và modules\juce_audio_formats.
+JUCE đóng gói sẵn vài thư viện nhỏ dùng cho giao diện và định
+dạng WAV: zlib, libpng và libjpeg. Bản OneCast này build với
+JUCE_USE_FLAC=0 và JUCE_USE_OGGVORBIS=0 nên mã FLAC và Ogg
+Vorbis không có trong exe, và giấy phép của chúng không cần kèm
+theo. Mỗi thư viện còn lại có giấy phép riêng, đều cho phép phát
+tán kèm ứng dụng; toàn văn ở các mục dưới đây.
+
+----------------------------------------------------------------
+zlib  (JUCE dùng để nén, được biên dịch thẳng vào OneCast)
+----------------------------------------------------------------
+(C) 1995-2004 Jean-loup Gailly and Mark Adler
+
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+
+Jean-loup Gailly        Mark Adler
+jloup@gzip.org          madler@alumni.caltech.edu
+
+----------------------------------------------------------------
+libpng 1.6.37  (JUCE dùng để đọc/ghi PNG cho giao diện)
+----------------------------------------------------------------
+COPYRIGHT NOTICE, DISCLAIMER, and LICENSE
+
+PNG Reference Library License version 2
+
+ * Copyright (c) 1995-2019 The PNG Reference Library Authors.
+ * Copyright (c) 2018-2019 Cosmin Truta.
+ * Copyright (c) 2000-2002, 2004, 2006-2018 Glenn Randers-Pehrson.
+ * Copyright (c) 1996-1997 Andreas Dilger.
+ * Copyright (c) 1995-1996 Guy Eric Schalnat, Group 42, Inc.
+
+The software is supplied "as is", without warranty of any kind,
+express or implied, including, without limitation, the warranties
+of merchantability, fitness for a particular purpose, title, and
+non-infringement.  In no event shall the Copyright owners, or
+anyone distributing the software, be liable for any damages or
+other liability, whether in contract, tort or otherwise, arising
+from, out of, or in connection with the software, or the use or
+other dealings in the software, even if advised of the possibility
+of such damage.
+
+Permission is hereby granted to use, copy, modify, and distribute
+this software, or portions hereof, for any purpose, without fee,
+subject to the following restrictions:
+
+ 1. The origin of this software must not be misrepresented; you
+    must not claim that you wrote the original software.  If you
+    use this software in a product, an acknowledgment in the product
+    documentation would be appreciated, but is not required.
+
+ 2. Altered source versions must be plainly marked as such, and must
+    not be misrepresented as being the original software.
+
+ 3. This Copyright notice may not be removed or altered from any
+    source or altered source distribution.
+
+----------------------------------------------------------------
+libjpeg 6b  (JUCE dùng để đọc/ghi JPEG cho giao diện)
+----------------------------------------------------------------
+This software is based in part on the work of the Independent JPEG
+Group.
+
+This software is copyright (C) 1991-1998, Thomas G. Lane.
+All Rights Reserved except as specified below.
+
+The authors make NO WARRANTY or representation, either express or
+implied, with respect to this software, its quality, accuracy,
+merchantability, or fitness for a particular purpose.  This software
+is provided "AS IS", and you, its user, assume the entire risk as to
+its quality and accuracy.
+
+Permission is hereby granted to use, copy, modify, and distribute this
+software (or portions thereof) for any purpose, without fee, subject to
+these conditions:
+(1) If any part of the source code for this software is distributed,
+then this README file must be included, with this copyright and
+no-warranty notice unaltered; and any additions, deletions, or changes
+to the original files must be clearly indicated in accompanying
+documentation.
+(2) If only executable code is distributed, then the accompanying
+documentation must state that "this software is based in part on the
+work of the Independent JPEG Group".
+(3) Permission for use of this software is granted only if the user
+accepts full responsibility for any undesirable consequences; the
+authors accept NO LIABILITY for damages of any kind.
 
 ----------------------------------------------------------------
 RNNoise  (khử ồn bằng AI, được biên dịch thẳng vào OneCast)

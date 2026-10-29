@@ -131,8 +131,8 @@ MIC DYNAMIC / XLR QUA M-AUDIO M-TRACK SOLO (dùng ASIO - khuyên dùng)
       Buffer   :  128 (mặc định; thử 64 nếu máy chạy ổn, tăng
                   lên 256 nếu nghe tiếng lụp bụp)
 
-   Các lựa chọn khác của "Kênh": "Kênh 2", hoặc "Trộn 1+2"
-   (trung bình hai kênh) - dùng khi mic cắm ở cổng 2.
+   Các lựa chọn khác của "Kênh": "Kênh 2" dùng khi mic cắm ở cổng 2;
+   "Trộn 1+2" lấy trung bình âm thanh của cả hai cổng.
 
    Lưu ý: ASIO chỉ cho MỘT app dùng driver tại một thời điểm.
    Nếu thấy thông báo "Không mở được ...", hãy đóng app đang giữ
@@ -201,7 +201,7 @@ Nhớ: đừng thêm bộ lọc "Noise Suppression" của OBS lên nguồn này
 (trừ khi bạn thật sự muốn khử ồn lần hai).
 
 ----------------------------------------------------------------
-7. KHỬ ỒN: HAI CHẾ ĐỘ VÀ ĐỘ TRỄ
+7. CÁC CHẾ ĐỘ KHỬ ỒN
 ----------------------------------------------------------------
 Thẻ "Khử ồn" có ba chế độ:
 
@@ -242,8 +242,10 @@ có tiếng "bụp".
 ----------------------------------------------------------------
 8. CÁC THẺ XỬ LÝ KHÁC, PRESET VÀ BYPASS
 ----------------------------------------------------------------
-Mỗi thẻ có công tắc bật / tắt riêng và vài núm chỉnh. Bấm đúp vào
-một núm để đưa nó về giá trị mặc định.
+Hầu hết các thẻ có công tắc bật / tắt riêng (Pre-gain và Đầu ra
+luôn bật; Khử ồn chọn Tắt / Nhẹ / AI) và vài núm chỉnh. Bấm đúp vào
+một núm để đưa nó về giá trị mặc định; bấm vào số dưới núm để gõ
+một giá trị chính xác.
 
    Pre-gain     Khuếch đại giọng ngay sau cổng vào (mặc định
                 +6 dB). Mic dynamic thường nhỏ tiếng nên cần.
