@@ -107,6 +107,7 @@ private:
     // Recovery
     void watchAudioDevice();
     void audioDeviceLost (bool closeIt);
+    void handleUnexpectedDevice();
     void tryReopenLostDevice();
     void endpointArrived();
     void endpointDeparted();
