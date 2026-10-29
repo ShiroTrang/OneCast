@@ -22,6 +22,11 @@ public:
         shared            ///< shared mode at the default period (legacy behaviour)
     };
 
+    /// A period hint with this value means "this machine needs the standard
+    /// shared rung": start() skips the IAudioClient3 low-latency rung and does
+    /// not waste a re-open on a period it has already failed to sustain.
+    static constexpr int standardSharedPeriodHint = -1;
+
     WasapiOutputDevice();
     ~WasapiOutputDevice();
 
@@ -38,8 +43,10 @@ public:
                              the endpoint's native mix format rate.
         @param periodHintFrames  IAudioClient3 period this machine sustained last
                              time, in frames; 0 starts at the endpoint minimum.
-                             The engine escalates from there if the endpoint
-                             starves.
+                             standardSharedPeriodHint (-1) skips the low-latency
+                             rung, for a machine that had to fall back before.
+                             The engine escalates from a real period if the
+                             endpoint starves.
         @returns true on success, false on failure (check getErrorMessage()). */
     bool start (const juce::String& deviceId, RingBuffer& inputBuffer,
                 int producerRate = 0, int periodHintFrames = 0);
@@ -98,14 +105,20 @@ public:
         the buffer. */
     int getStarvedEventCount() const noexcept;
 
-    /** The IAudioClient3 period currently in use, in frames. Changes when the
-        render thread escalates to a larger period; 0 when the stream is not
-        shared low latency. */
+    /** The period hint to persist for the next run, in frames: the
+        IAudioClient3 period currently in use (it changes when the render
+        thread escalates), standardSharedPeriodHint (-1) when the stream is on
+        the standard shared rung, 0 when no stream is open or it is exclusive. */
     int getOutputPeriodFrames() const noexcept;
 
     /** Times the render thread left its loop to raise the period (or to fall
         back to the standard shared rung) because the endpoint starved. */
     int getEscalationCount() const noexcept;
+
+    /** Whether the render thread got an MMCSS ("Pro Audio" or "Audio")
+        registration. Published for describeLatency(); false while no stream is
+        open. */
+    bool isMmcssActive() const noexcept;
 
     struct DeviceInfo
     {
@@ -136,6 +149,7 @@ private:
         startAudioClient,
         startTimedOut,
         deviceDisconnected,
+        streamStalled,
         waitFailed
     };
 
@@ -176,6 +190,10 @@ private:
     std::atomic<int>    starvedEventCount { 0 };
     std::atomic<int>    outputPeriodFrames { 0 };
     std::atomic<int>    escalationCount { 0 };
+
+    // MMCSS registration is published as an atomic so describeLatency() can
+    // report it without reading the render thread's local handle.
+    std::atomic<bool>   mmcssActive { false };
 
     // Honest output latency, published by the render thread. The ring fill is
     // in producer frames and the endpoint padding in device frames, both

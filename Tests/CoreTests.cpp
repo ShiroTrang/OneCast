@@ -156,6 +156,43 @@ public:
             expect (std::abs (l[40] - 0.5f) < 1.0e-4f, "audio flows once primed");
         }
 
+        beginTest ("partial underrun fades out instead of cutting to silence");
+        {
+            RingBuffer ring (1, 4096);
+            DriftCompensatedReader reader;
+            reader.prepare (1, 256, 48000.0, 512);
+
+            // Exactly the target, so the first read leaves priming and consumes
+            // one block, leaving less than the next request needs in the ring.
+            std::vector<float> audio (512, 0.5f);
+            const float* source[] = { audio.data() };
+            ring.write (source, 512, 1);
+
+            float out[256];
+            float* dest[] = { out };
+            expectEquals (reader.read (ring, dest, 1, 256, 1.0), 256);
+
+            const int produced = reader.read (ring, dest, 1, 256, 1.0);
+
+            float maxStep = 0.0f;
+            for (int i = 1; i < 256; ++i)
+                maxStep = juce::jmax (maxStep, std::abs (out[i] - out[i - 1]));
+
+            std::printf ("    [measured] partial underrun: %d of 256 frames, "
+                         "max step %.5f, ring %d\n",
+                         produced, maxStep, ring.getAvailableForRead());
+
+            expect (produced > 0 && produced < 256,
+                    "the available audio is delivered, not zeroed");
+            expectEquals (reader.getUnderrunCount(), 1);
+            expect (reader.isPriming(), "the reader re-primes after a shortfall");
+
+            // A hard cut from 0.5 to zero would be a 0.5 step; the fade keeps
+            // every adjacent step far below that.
+            expectLessThan (maxStep, 0.05f, "no hard edge into silence");
+            expectEquals (out[255], 0.0f);
+        }
+
         beginTest ("same nominal rate, producer 150 ppm fast: holds the backlog");
         {
             ClockSimulation sim;

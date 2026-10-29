@@ -23,7 +23,9 @@
 ///
 /// - It starts "priming": silence until the backlog reaches the target, so the
 ///   first blocks do not underrun by construction.
-/// - On an underrun it goes back to priming instead of clicking every block.
+/// - On an underrun it delivers the audio the ring still holds, fades it out
+///   over about 2 ms (a hard cut at full scale is a click), then goes back to
+///   priming instead of clicking every block.
 /// - On a large overshoot (a producer that wrote while nobody was reading) it
 ///   discards the excess at once instead of slewing for minutes.
 ///
@@ -53,6 +55,7 @@ public:
         maxFrames  = maxFramesPerRead;
         sampleRate = consumerRate;
         target.store (juce::jmax (1, targetFillFrames), std::memory_order_relaxed);
+        targetBeforeLastSet = target.load (std::memory_order_relaxed);
 
         scratchSize = static_cast<int> (std::ceil (maxFramesPerRead * maxNominalRatio
                                                    * (1.0 + maxCorrection))) + 8;
@@ -76,6 +79,7 @@ public:
     void reset() noexcept
     {
         priming = true;
+        primingTarget = target.load (std::memory_order_relaxed);
         fillEstimate = 0.0;
 
         for (auto& interp : interpolators)
@@ -88,8 +92,16 @@ public:
     /// supply are silence. Channels of @p dest beyond the prepared channel
     /// count are cleared.
     ///
+    /// A shortfall is not zeroed wholesale: the frames the ring does hold are
+    /// delivered first, then a fade of about 2 ms, then silence. Cutting from
+    /// full scale to zero in one sample is an audible click, and on a render
+    /// event that arrived late it would happen exactly when the user is already
+    /// hearing a glitch.
+    ///
     /// @param nominalRatio  producer rate / consumer rate (1.0 when equal).
-    /// @return Number of frames that carry real audio (0 or numFrames).
+    /// @return Number of frames that carry real audio: 0 while priming or with
+    ///         nothing to play, numFrames on a full read, or the count before a
+    ///         partial-underrun fade.
     int read (RingBuffer& ring, float* const* dest, int numDestChannels,
               int numFrames, double nominalRatio) noexcept
     {
@@ -115,7 +127,12 @@ public:
 
         if (priming)
         {
-            if (available < targetFill)
+            // primingTarget is latched when priming starts. It is the target
+            // from before the event that caused the underrun, so a late render
+            // event which asks for a whole buffer (and raises the target) does
+            // not make the reader wait for the raised figure: that would turn
+            // one late event into permanent extra latency.
+            if (available < primingTarget)
                 return silence (dest, numDestChannels, numFrames);
 
             priming = false;
@@ -142,14 +159,30 @@ public:
         const int needed = juce::jmin (scratchSize,
                                        static_cast<int> (std::ceil (numFrames * ratio)) + 2);
 
-        if (available < needed)
+        // A shortfall: play what is there, then fade into silence.
+        const bool partial = available < needed;
+        int producible = numFrames;
+
+        if (partial)
         {
-            priming = true;
-            underruns.fetch_add (1, std::memory_order_relaxed);
-            return silence (dest, numDestChannels, numFrames);
+            // Input frames needed for `producible` outputs, with the same +2
+            // margin the full path uses; the interpolator feeds zeros once its
+            // input runs out, and the fade must not sit on those zeros.
+            producible = (int) std::floor ((double) (available - 2) / ratio);
+
+            if (producible <= 0)
+            {
+                underruns.fetch_add (1, std::memory_order_relaxed);
+                startPriming();
+                return silence (dest, numDestChannels, numFrames);
+            }
+
+            producible = juce::jmin (producible, numFrames);
         }
 
-        ring.peek (scratchPtrs.data(), needed, channels);
+        const int inputAvailable = partial ? available : needed;
+
+        ring.peek (scratchPtrs.data(), inputAvailable, channels);
 
         int used = 0;
         const int channelsToWrite = juce::jmin (channels, numDestChannels);
@@ -160,18 +193,33 @@ public:
         {
             float* out = ch < channelsToWrite ? dest[ch] : spareOut.data();
             used = interpolators[(size_t) ch]->process (ratio, scratchPtrs[(size_t) ch], out,
-                                                         numFrames, needed, 0);
+                                                         producible, inputAvailable, 0);
         }
 
         for (int ch = channelsToWrite; ch < numDestChannels; ++ch)
             juce::FloatVectorOperations::clear (dest[ch], numFrames);
 
         ring.discard (used);
-        return numFrames;
+
+        if (! partial)
+            return numFrames;
+
+        fadeOutAndSilence (dest, juce::jmin (channelsToWrite, numDestChannels),
+                           producible, numFrames);
+        underruns.fetch_add (1, std::memory_order_relaxed);
+        startPriming();
+        return producible;
     }
 
     int    getTargetFill() const noexcept    { return target.load (std::memory_order_relaxed); }
-    void   setTargetFill (int frames) noexcept { target.store (juce::jmax (1, frames), std::memory_order_relaxed); }
+
+    /// Consumer thread only. The previous value is remembered so a re-prime
+    /// can ignore a target that the same (late) render event just raised.
+    void   setTargetFill (int frames) noexcept
+    {
+        targetBeforeLastSet = target.exchange (juce::jmax (1, frames),
+                                               std::memory_order_relaxed);
+    }
     double getCurrentRatio() const noexcept  { return currentRatio.load (std::memory_order_relaxed); }
     int    getUnderrunCount() const noexcept { return underruns.load (std::memory_order_relaxed); }
     int    getResyncCount() const noexcept   { return resyncs.load (std::memory_order_relaxed); }
@@ -189,9 +237,49 @@ private:
         return 0;
     }
 
+    /// Go back to waiting for the backlog, but only up to the target that was
+    /// in force before the newest one. A late render event asks for a whole
+    /// buffer and the backlog target jumps to cover it; priming to that raised
+    /// figure would keep the extra latency for the rest of the session.
+    void startPriming() noexcept
+    {
+        priming = true;
+        primingTarget = juce::jmax (1, juce::jmin (target.load (std::memory_order_relaxed),
+                                                   targetBeforeLastSet));
+    }
+
+    /// Keep the real frames (already resampled into dest) and bring the tail
+    /// down to silence over about 2 ms. Clearing the remainder is what the old
+    /// code did to the whole block; the fade is what keeps that from clicking.
+    void fadeOutAndSilence (float* const* dest, int numDestChannels,
+                            int produced, int numFrames) noexcept
+    {
+        const int fadeFrames = juce::jmin (produced,
+                                           juce::jmax (1, (int) std::lround (fadeOutSeconds
+                                                                             * sampleRate)));
+        const int fadeStart = produced - fadeFrames;
+
+        for (int ch = 0; ch < numDestChannels; ++ch)
+        {
+            float* out = dest[ch];
+
+            if (out == nullptr)
+                continue;
+
+            for (int i = fadeStart; i < produced; ++i)
+                out[i] *= (float) (produced - i) / (float) (fadeFrames + 1);
+
+            juce::FloatVectorOperations::clear (out + produced, numFrames - produced);
+        }
+    }
+
     /// The loop is critically damped when correctionSeconds = 4 * fillSmoothingSeconds.
     static constexpr double fillSmoothingSeconds = 0.5;
     static constexpr double correctionSeconds    = 2.0;
+
+    /// Length of the partial-underrun fade. Two milliseconds is long enough to
+    /// remove the click and far shorter than a render period on any device.
+    static constexpr double fadeOutSeconds = 0.002;
 
     int channels = 0;
     int maxFrames = 0;
@@ -207,6 +295,11 @@ private:
 
     bool   priming = true;
     double fillEstimate = 0.0;
+
+    // Consumer thread only. primingTarget is latched when priming starts and
+    // targetBeforeLastSet is the target from before the newest setTargetFill().
+    int primingTarget = 1;
+    int targetBeforeLastSet = 1;
 
     std::atomic<int>    target { 1 };
     std::atomic<double> currentRatio { 1.0 };

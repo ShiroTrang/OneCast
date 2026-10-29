@@ -7,12 +7,15 @@
 #include <JuceHeader.h>
 
 #include "../Source/Audio/BacklogTarget.h"
+#include "../Source/Audio/DriftCompensatedReader.h"
+#include "../Source/Audio/OutputCeiling.h"
 #include "../Source/Audio/PeriodPolicy.h"
 #include "../Source/Audio/RingBuffer.h"
 #include "../Source/Audio/SharedStreamFormat.h"
 #include "../Source/Audio/WasapiOutputDevice.h"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <type_traits>
 #include <utility>
@@ -23,6 +26,93 @@ namespace
     int expectedMargin (double deviceRate, double marginMs)
     {
         return (int) std::lround (deviceRate * marginMs / 1000.0);
+    }
+
+    /// A band-limited-ish square: its steps are what makes the 4-point
+    /// interpolation ring above the input's own peak.
+    std::vector<float> makeSquare (int frames, int halfPeriod, float amplitude)
+    {
+        std::vector<float> data ((size_t) frames * 2);
+
+        for (int i = 0; i < frames; ++i)
+        {
+            const float value = ((i / halfPeriod) % 2) == 0 ? amplitude : -amplitude;
+            data[(size_t) i * 2] = value;
+            data[(size_t) i * 2 + 1] = value;
+        }
+
+        return data;
+    }
+
+    /// Deterministic white noise at the same amplitude; random neighbours with
+    /// opposite signs are the other case the Lagrange polynomial overshoots.
+    std::vector<float> makeNoise (int frames, float amplitude)
+    {
+        std::vector<float> data ((size_t) frames * 2);
+        std::uint32_t state = 0x12345678u;
+
+        for (int i = 0; i < frames; ++i)
+        {
+            state = state * 1664525u + 1013904223u;
+            const float value = ((float) (std::int32_t) state / 2147483648.0f) * amplitude;
+            data[(size_t) i * 2] = value;
+            data[(size_t) i * 2 + 1] = value;
+        }
+
+        return data;
+    }
+
+    struct ReaderPeaks
+    {
+        float raw = 0.0f;
+        float clamped = 0.0f;
+        int frames = 0;
+    };
+
+    /// Push a signal through DriftCompensatedReader at a nominal ratio and
+    /// report the largest absolute sample before and after the render path's
+    /// clamp.
+    ReaderPeaks measureReaderPeaks (const std::vector<float>& interleaved,
+                                    int totalFrames, double nominalRatio)
+    {
+        RingBuffer ring (2, 1 << 16);
+        DriftCompensatedReader reader;
+        reader.prepare (2, 256, 48000.0, 1024);
+
+        std::vector<float> left (256), right (256);
+        float* out[] = { left.data(), right.data() };
+
+        ReaderPeaks peaks;
+        int fed = 0;
+
+        while (fed < totalFrames)
+        {
+            // Keep about 2048 frames in the ring: enough to stay primed and
+            // far below the reader's resync threshold, so no content is
+            // skipped by a resync.
+            while (fed < totalFrames && ring.getAvailableForRead() < 2048)
+            {
+                const int chunk = juce::jmin (256, totalFrames - fed);
+                ring.writeInterleaved (interleaved.data() + (size_t) fed * 2, chunk, 2);
+                fed += chunk;
+            }
+
+            if (reader.read (ring, out, 2, 256, nominalRatio) <= 0)
+                continue;
+
+            peaks.frames += 256;
+
+            for (int i = 0; i < 256; ++i)
+            {
+                peaks.raw = juce::jmax (peaks.raw, std::abs (left[(size_t) i]),
+                                        std::abs (right[(size_t) i]));
+                peaks.clamped = juce::jmax (peaks.clamped,
+                                            std::abs (OutputCeiling::clamp (left[(size_t) i])),
+                                            std::abs (OutputCeiling::clamp (right[(size_t) i])));
+            }
+        }
+
+        return peaks;
     }
 }
 
@@ -181,6 +271,58 @@ public:
             // Same degenerate rules as initialPeriod.
             expectEquals (PeriodPolicy::nextLarger (200, 128, 0, 480), 128);
             expectEquals (PeriodPolicy::nextLarger (200, 480, 16, 128), 480);
+        }
+
+        beginTest ("period policy: an unaligned maximum is aligned down");
+        {
+            // The engine's maximum is a bound, not necessarily a period it
+            // accepts: only min + k * fundamental is valid. Asking for 470
+            // when the grid ends at 464 would be refused, not clamp.
+            expectEquals (PeriodPolicy::initialPeriod (128, 16, 470, 10000), 464);
+            expectEquals (PeriodPolicy::initialPeriod (128, 16, 470, 465), 464);
+            expectEquals (PeriodPolicy::initialPeriod (128, 16, 470, 463), 464);
+            expectEquals (PeriodPolicy::initialPeriod (128, 16, 470, 200), 208);
+            expectEquals (PeriodPolicy::nextLarger (448, 128, 16, 470), 464);
+            expectEquals (PeriodPolicy::nextLarger (464, 128, 16, 470), 464);
+        }
+
+        beginTest ("output ceiling: the resampler overshoots, the clamp does not");
+        {
+            constexpr float ceiling = OutputCeiling::ceiling;
+
+            // Direct behaviour of the clamp itself, including the sign.
+            expectEquals (OutputCeiling::clamp (2.0f), ceiling);
+            expectEquals (OutputCeiling::clamp (-2.0f), -ceiling);
+            expectEquals (OutputCeiling::clamp (0.25f), 0.25f);
+
+            constexpr int frames = 100000;
+            const double ratios[] = { 1.002, 44100.0 / 48000.0 };
+
+            for (const double ratio : ratios)
+            {
+                const std::pair<const char*, std::vector<float>> signals[]
+                {
+                    { "square", makeSquare (frames, 16, ceiling) },
+                    { "noise",  makeNoise (frames, ceiling) }
+                };
+
+                for (const auto& signal : signals)
+                {
+                    const auto peaks = measureReaderPeaks (signal.second, frames, ratio);
+
+                    std::printf ("    [measured] %s ratio %.4f: raw peak %.6f, clamped %.6f "
+                                 "(%d frames)\n",
+                                 signal.first, ratio, peaks.raw, peaks.clamped, peaks.frames);
+
+                    expect (peaks.frames > 20000, "not enough audio measured");
+                    expect (peaks.raw > ceiling,
+                            signal.first + juce::String (" at ratio ")
+                                + juce::String (ratio)
+                                + " must show the interpolation overshoot");
+                    expect (peaks.clamped <= ceiling,
+                            "the render clamp must bring every sample under -1 dBFS");
+                }
+            }
         }
 
         beginTest ("starvation window: two events within the window escalate");

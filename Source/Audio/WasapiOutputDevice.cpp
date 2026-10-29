@@ -3,6 +3,7 @@
 #include "PeriodPolicy.h"
 #include "RingBuffer.h"
 #include "DriftCompensatedReader.h"
+#include "OutputCeiling.h"
 #include "SharedStreamFormat.h"
 #include "../Diagnostics/StartupLog.h"
 #include <avrt.h>
@@ -52,6 +53,20 @@ namespace
         return "unknown";
     }
 
+    /// The value getOutputPeriodFrames() publishes for the next launch: the
+    /// period that was sustained, or the "use standard shared" sentinel when
+    /// the low-latency rung was left behind. Exclusive has no IAudioClient3
+    /// period, so it keeps the no-hint value.
+    int periodHintFor (WasapiOutputDevice::OutputMode mode, int sharedPeriod) noexcept
+    {
+        if (mode == WasapiOutputDevice::OutputMode::sharedLowLatency)
+            return sharedPeriod;
+
+        return mode == WasapiOutputDevice::OutputMode::shared
+                 ? WasapiOutputDevice::standardSharedPeriodHint
+                 : 0;
+    }
+
     /// One stereo exclusive-mode candidate. 24-in-32 keeps 24 valid bits in a
     /// 32-bit container (left-justified); 16-bit uses plain PCM because some
     /// drivers only accept the classic header for that depth.
@@ -81,6 +96,32 @@ namespace
                                                         : KSDATAFORMAT_SUBTYPE_PCM;
             format.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
         }
+    }
+
+    /// The endpoint's friendly name ("CABLE Input (VB-Audio Virtual Cable)",
+    /// say). Used both by the device list and by the render thread, which has
+    /// to know whether it may try the exclusive rung.
+    juce::String getDeviceFriendlyName (IMMDevice* device)
+    {
+        if (device == nullptr)
+            return {};
+
+        IPropertyStore* props = nullptr;
+
+        if (FAILED (device->OpenPropertyStore (STGM_READ, &props)) || props == nullptr)
+            return {};
+
+        juce::String name;
+        PROPVARIANT varName;
+        PropVariantInit (&varName);
+
+        if (SUCCEEDED (props->GetValue (PKEY_Device_FriendlyName, &varName))
+            && varName.pwszVal != nullptr)
+            name = juce::String (varName.pwszVal);
+
+        PropVariantClear (&varName);
+        props->Release();
+        return name;
     }
 
     REFERENCE_TIME framesToRefTime (int frames, int rate) noexcept
@@ -161,6 +202,7 @@ bool WasapiOutputDevice::start (const juce::String& deviceId, RingBuffer& inputB
     measuredPaddingFrames.store (0.0, std::memory_order_relaxed);
     streamLatencyMs.store (0.0, std::memory_order_relaxed);
     paddingValid.store (false, std::memory_order_relaxed);
+    mmcssActive.store (false, std::memory_order_relaxed);
     ResetEvent (stopEvent);
     ResetEvent (startEvent);
 
@@ -228,6 +270,7 @@ void WasapiOutputDevice::stop()
     measuredPaddingFrames.store (0.0, std::memory_order_relaxed);
     streamLatencyMs.store (0.0, std::memory_order_relaxed);
     paddingValid.store (false, std::memory_order_relaxed);
+    mmcssActive.store (false, std::memory_order_relaxed);
 }
 
 void WasapiOutputDevice::setProducerFormat (double rate, int blockSize)
@@ -281,6 +324,9 @@ juce::String WasapiOutputDevice::getErrorMessage() const
         case ErrorCode::bufferSize:             return hresult ("Failed to get buffer size: ");
         case ErrorCode::startAudioClient:       return hresult ("Failed to start audio client: ");
         case ErrorCode::deviceDisconnected:     return "Audio device was disconnected";
+        case ErrorCode::streamStalled:          return "the output stream stalled "
+                                                       "(no render event or no usable buffer for "
+                                                       "500 ms)";
         case ErrorCode::startTimedOut:          return "the render thread did not start ("
                                                        + juce::String (detail) + ")";
         case ErrorCode::waitFailed:             return "WaitForMultipleObjects failed: "
@@ -382,6 +428,11 @@ int WasapiOutputDevice::getEscalationCount() const noexcept
     return escalationCount.load (std::memory_order_relaxed);
 }
 
+bool WasapiOutputDevice::isMmcssActive() const noexcept
+{
+    return mmcssActive.load (std::memory_order_relaxed);
+}
+
 //==============================================================================
 std::vector<WasapiOutputDevice::DeviceInfo> WasapiOutputDevice::getAvailableDevices()
 {
@@ -421,21 +472,7 @@ std::vector<WasapiOutputDevice::DeviceInfo> WasapiOutputDevice::getAvailableDevi
                 LPWSTR id = nullptr;
                 dev->GetId (&id);
 
-                IPropertyStore* props = nullptr;
-                dev->OpenPropertyStore (STGM_READ, &props);
-
-                juce::String name;
-                if (props != nullptr)
-                {
-                    PROPVARIANT varName;
-                    PropVariantInit (&varName);
-                    if (SUCCEEDED (props->GetValue (PKEY_Device_FriendlyName, &varName)))
-                        name = juce::String (varName.pwszVal);
-                    PropVariantClear (&varName);
-                    props->Release();
-                }
-
-                devices.push_back ({ juce::String (id), name });
+                devices.push_back ({ juce::String (id), getDeviceFriendlyName (dev) });
 
                 if (id != nullptr)
                     CoTaskMemFree (id);
@@ -530,6 +567,15 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         cleanup();
         return;
     }
+
+    // Exclusive mode takes the endpoint away from every other application:
+    // while OneCast holds it, Windows plays nothing else through that device.
+    // That is acceptable for the virtual cable (its only user is this app),
+    // but a user who picks their speakers or headphones as the output must
+    // keep hearing everything else, so only the cable may be opened
+    // exclusively. Everything else starts at the shared low-latency rung.
+    const bool cableEndpoint = getDeviceFriendlyName (device)
+                                   .containsIgnoreCase ("CABLE Input");
 
     // ---- Activate audio client and get the mix format ----
     hr = device->Activate (__uuidof (IAudioClient), CLSCTX_ALL,
@@ -644,6 +690,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     };
 
     // ---- Rung 1: exclusive, event-driven, minimum device period ----
+    // Only for the virtual cable; see cableEndpoint above.
+    if (cableEndpoint)
     {
         int rates[3] = { 0, 0, 0 };
         int rateCount = 0;
@@ -759,7 +807,10 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     }
 
     // ---- Rung 2: shared low-latency (IAudioClient3, minimum engine period) ----
-    if (! opened)
+    // A hint of standardSharedPeriodHint means this machine already had to
+    // fall back: opening the low-latency stream again would only starve and
+    // re-open once more before settling on the same rung.
+    if (! opened && periodHintFrames != standardSharedPeriodHint)
     {
         hr = activateClient();
 
@@ -948,10 +999,10 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     numChannels.store (deviceChannels);
     outputMode.store ((int) mode);
 
-    // The hint saved for the next launch is a low-latency period; the standard
-    // shared rung has no meaningful equivalent and reports 0.
-    if (mode == OutputMode::sharedLowLatency)
-        outputPeriodFrames.store (sharedPeriod, std::memory_order_relaxed);
+    // The hint saved for the next launch: the sustained low-latency period, or
+    // the standard-shared sentinel if this machine had to fall back.
+    outputPeriodFrames.store (periodHintFor (mode, sharedPeriod),
+                              std::memory_order_relaxed);
 
     devicePeriodMs.store (periodMs);
     streamLatencyMs.store (streamLatency / 10000.0);
@@ -1042,7 +1093,9 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                       + " format=" + juce::String (pcmKindName (kind))
                       + " " + juce::String (deviceChannels) + " ch "
                       + juce::String (deviceSampleRate) + " Hz period="
-                      + juce::String (periodMs, 2) + " ms");
+                      + juce::String (periodMs, 2) + " ms buffer="
+                      + juce::String ((int) bufferSize) + " frames ("
+                      + juce::String (1000.0 * bufferSize / deviceSampleRate, 2) + " ms)");
 
     // ---- Start the stream ----
     hr = audioClient->Start();
@@ -1075,6 +1128,10 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
     const bool mmcssHighPriority = mmcssHandle != nullptr
                                     && AvSetMmThreadPriority (mmcssHandle, AVRT_PRIORITY_HIGH) != FALSE;
+
+    // Published for describeLatency() on the message thread. Only whether the
+    // registration succeeded matters there; the class name stays in this log.
+    mmcssActive.store (mmcssHandle != nullptr, std::memory_order_relaxed);
 
     // Before the loop: after this the thread must not build a string or touch
     // the file system again.
@@ -1142,17 +1199,13 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
             }
         }
 
-        hr = audioClient->Start();
-        if (FAILED (hr))
-            return false;
-
         periodMs = 1000.0 * periodFrames / (double) deviceSampleRate;
 
         sampleRate.store (deviceSampleRate);
         numChannels.store (deviceChannels);
         outputMode.store ((int) mode);
         devicePeriodMs.store (periodMs);
-        outputPeriodFrames.store (mode == OutputMode::sharedLowLatency ? sharedPeriod : 0,
+        outputPeriodFrames.store (periodHintFor (mode, sharedPeriod),
                                   std::memory_order_relaxed);
 
         REFERENCE_TIME streamLatency = 0;
@@ -1163,10 +1216,12 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         paddingValid.store (false);
         measuredPaddingFrames.store (0.0);
 
+        // Everything the loop touches is prepared before Start(), as in the
+        // initial open: the first render event after Start() must not find a
+        // half-prepared reader, and allocating here is allowed only because
+        // the loop is not running yet.
         resizeTempBuffers();
 
-        // The ring keeps the audio the producer wrote during the re-open; only
-        // the reader is re-primed for the new endpoint period.
         const double currentProducerRate = producerSampleRate.load (std::memory_order_relaxed);
         const double ratio = currentProducerRate > 0.0
                                ? currentProducerRate / (double) deviceSampleRate
@@ -1177,6 +1232,18 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                          1.5, 5.0, currentProducerRate);
 
         const int target = (int) std::lround (backlog.getTargetFrames() * ratio);
+
+        // The re-open gap let the producer run ahead by however long the
+        // endpoint was stopped. Playing that backlog after the re-open would
+        // add the whole gap to the output latency for the rest of the session,
+        // so cut it to the new target exactly as the initial open does.
+        {
+            const int staleFrames = buffer->getAvailableForRead() - target;
+
+            if (staleFrames > 0)
+                buffer->discard (staleFrames);
+        }
+
         backlogTargetFrames.store (target, std::memory_order_relaxed);
         reader.prepare (buffer->getNumChannels(), static_cast<int> (bufferSize),
                         static_cast<double> (deviceSampleRate), target);
@@ -1186,6 +1253,11 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         havePreviousEvent = false;
         eventsSeen = 0;
         starvation.reset (qpcSeconds());
+
+        hr = audioClient->Start();
+        if (FAILED (hr))
+            return false;
+
         return true;
     };
 
@@ -1199,7 +1271,11 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
         hr = activateClient();
         if (FAILED (hr) || audioClient == nullptr)
+        {
+            if (SUCCEEDED (hr))
+                hr = E_POINTER;
             return false;
+        }
 
         IAudioClient3* client3 = nullptr;
         hr = audioClient->QueryInterface (__uuidof (IAudioClient3),
@@ -1207,6 +1283,11 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
         if (FAILED (hr) || client3 == nullptr)
         {
+            // A success with no interface would otherwise reach the caller as
+            // hr == S_OK and the error banner would read "0x0".
+            if (SUCCEEDED (hr))
+                hr = E_NOINTERFACE;
+
             SAFE_RELEASE (client3);
             return false;
         }
@@ -1215,8 +1296,11 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         hr = client3->GetSharedModeEnginePeriod ((WAVEFORMATEX*) mixFormat,
                                                  &sharedDefault, &fundamental,
                                                  &sharedMin, &sharedMax);
-        if (FAILED (hr))
+        if (FAILED (hr) || sharedMin == 0)
         {
+            if (SUCCEEDED (hr))
+                hr = AUDCLNT_E_UNSUPPORTED_FORMAT;
+
             client3->Release();
             return false;
         }
@@ -1239,11 +1323,19 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         hr = audioClient->GetService (__uuidof (IAudioRenderClient),
                                       reinterpret_cast<void**> (&renderClient));
         if (FAILED (hr) || renderClient == nullptr)
+        {
+            if (SUCCEEDED (hr))
+                hr = E_POINTER;
             return false;
+        }
 
         hr = audioClient->GetBufferSize (&bufferSize);
         if (FAILED (hr) || bufferSize == 0)
+        {
+            if (SUCCEEDED (hr))
+                hr = E_POINTER;
             return false;
+        }
 
         mode              = OutputMode::sharedLowLatency;
         kind              = PcmKind::float32;
@@ -1269,7 +1361,11 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
         hr = activateClient();
         if (FAILED (hr) || audioClient == nullptr)
+        {
+            if (SUCCEEDED (hr))
+                hr = E_POINTER;
             return false;
+        }
 
         REFERENCE_TIME defaultPeriod = 0, minPeriod = 0;
         hr = audioClient->GetDevicePeriod (&defaultPeriod, &minPeriod);
@@ -1293,11 +1389,19 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         hr = audioClient->GetService (__uuidof (IAudioRenderClient),
                                       reinterpret_cast<void**> (&renderClient));
         if (FAILED (hr) || renderClient == nullptr)
+        {
+            if (SUCCEEDED (hr))
+                hr = E_POINTER;
             return false;
+        }
 
         hr = audioClient->GetBufferSize (&bufferSize);
         if (FAILED (hr) || bufferSize == 0)
+        {
+            if (SUCCEEDED (hr))
+                hr = E_POINTER;
             return false;
+        }
 
         mode             = OutputMode::shared;
         kind             = PcmKind::float32;
@@ -1318,9 +1422,29 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     {
         const double lateThresholdMs = 2.0 * periodMs;
 
+        // Liveness. A stream can keep running=true while nothing reaches the
+        // cable: the events stop, or every GetCurrentPadding/GetBuffer fails.
+        // Both are published as "stream stalled" after half a second so the
+        // message thread can retry, instead of a banner-free dead output.
+        constexpr double stallSeconds = 0.5;
+        double lastRenderEventSeconds = qpcSeconds();
+        double bufferFailureSinceSeconds = -1.0;
+
+        const auto bufferFailed = [&]() noexcept -> bool
+        {
+            const double now = qpcSeconds();
+
+            if (bufferFailureSinceSeconds < 0.0)
+                bufferFailureSinceSeconds = now;
+
+            return now - bufferFailureSinceSeconds >= stallSeconds;
+        };
+
         while (true)
         {
-            DWORD result = WaitForMultipleObjects (2, events, FALSE, 2000);
+            // Wake often enough to notice a silent endpoint inside 500 ms. A
+            // stop costs at most this wait, which is inaudible for a shutdown.
+            DWORD result = WaitForMultipleObjects (2, events, FALSE, 100);
 
             if (result == WAIT_OBJECT_0)
             {
@@ -1333,6 +1457,13 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                 // Render event: WASAPI wants more audio data.
                 LARGE_INTEGER eventQpc {};
                 QueryPerformanceCounter (&eventQpc);
+
+                lastRenderEventSeconds = qpcSeconds();
+
+                // A late event is not evidence of the steady request: it can
+                // ask for a whole buffer after a stall. Feeding that to the
+                // backlog would raise the target for the rest of the session.
+                bool eventLate = false;
 
                 // The first event only starts the clock: there is no previous
                 // render event to measure a gap against, and the interval since
@@ -1351,7 +1482,10 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                     }
 
                     if (gapMs > lateThresholdMs)
+                    {
+                        eventLate = true;
                         lateEventCount.store (++lateEvents, std::memory_order_relaxed);
+                    }
                 }
                 else
                 {
@@ -1370,7 +1504,17 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                 }
 
                 if (FAILED (hr))
+                {
+                    if (bufferFailed())
+                    {
+                        setError (ErrorCode::streamStalled);
+                        return LoopExit::failed;
+                    }
+
                     continue;
+                }
+
+                bufferFailureSinceSeconds = -1.0;
 
                 // An empty endpoint at a render event means it played everything
                 // it had since the last one. This is the glitch signal: the
@@ -1395,7 +1539,20 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                     }
                 }
 
-                UINT32 available = bufferSize - padding;
+                // Exclusive mode is opened at exactly the endpoint buffer
+                // length, so one event frees the whole buffer and the whole
+                // buffer is written, as JUCE does. Shared streams fill only
+                // what the endpoint is not already holding.
+                UINT32 available = bufferSize;
+
+                if (mode != OutputMode::exclusive)
+                {
+                    if (padding >= bufferSize)
+                        continue;
+
+                    available = bufferSize - padding;
+                }
+
                 if (available == 0)
                     continue;
 
@@ -1411,8 +1568,17 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                 if (FAILED (hr) || data == nullptr)
                 {
                     bufferErrorCount.store (++bufferErrors, std::memory_order_relaxed);
+
+                    if (bufferFailed())
+                    {
+                        setError (ErrorCode::streamStalled);
+                        return LoopExit::failed;
+                    }
+
                     continue;
                 }
+
+                bufferFailureSinceSeconds = -1.0;
 
                 const int framesToRead = static_cast<int> (available);
 
@@ -1442,8 +1608,9 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
                 // The first events after Start() can ask for a whole buffer while
                 // the endpoint is still priming; treating that as the steady
-                // request would raise the target for the whole session.
-                if (++eventsSeen > 3)
+                // request would raise the target for the whole session. A late
+                // event is the same trap for the same reason.
+                if (++eventsSeen > 3 && ! eventLate)
                     backlog.onRequest (framesToRead);
 
                 const int targetFrames = (int) std::lround (backlog.getTargetFrames() * nominalRatio);
@@ -1459,13 +1626,18 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
                 // Interleave the per-channel data into the output buffer, in the
                 // format the stream actually accepted.
+                // The limiter runs before the reader's interpolation, which
+                // can overshoot a full-scale input by about 0.9 dB. This is
+                // the last point before the endpoint, so the clamp lives here
+                // for float and integer formats alike.
                 if (kind == PcmKind::float32)
                 {
                     float* outputFloat = reinterpret_cast<float*> (data);
 
                     for (int i = 0; i < framesToRead; ++i)
                         for (int ch = 0; ch < deviceChannels; ++ch)
-                            outputFloat[i * deviceChannels + ch] = tempChannelPtrs[(size_t) ch][i];
+                            outputFloat[i * deviceChannels + ch] =
+                                OutputCeiling::clamp (tempChannelPtrs[(size_t) ch][i]);
                 }
                 else if (kind == PcmKind::pcm16)
                 {
@@ -1473,7 +1645,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
                     for (int i = 0; i < framesToRead; ++i)
                         for (int ch = 0; ch < deviceChannels; ++ch)
-                            outputPcm[i * deviceChannels + ch] = toPcm16 (tempChannelPtrs[(size_t) ch][i]);
+                            outputPcm[i * deviceChannels + ch] =
+                                toPcm16 (OutputCeiling::clamp (tempChannelPtrs[(size_t) ch][i]));
                 }
                 else
                 {
@@ -1481,7 +1654,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
 
                     for (int i = 0; i < framesToRead; ++i)
                         for (int ch = 0; ch < deviceChannels; ++ch)
-                            outputPcm[i * deviceChannels + ch] = toPcm24In32 (tempChannelPtrs[(size_t) ch][i]);
+                            outputPcm[i * deviceChannels + ch] =
+                                toPcm24In32 (OutputCeiling::clamp (tempChannelPtrs[(size_t) ch][i]));
                 }
 
                 if (FAILED (renderClient->ReleaseBuffer (available, 0)))
@@ -1489,8 +1663,15 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
             }
             else if (result == WAIT_TIMEOUT)
             {
-                // Liveness check -- if the device was invalidated between events
-                // we detect it on the next GetCurrentPadding call. Just continue.
+                // A stream whose events stopped (audio service restart, another
+                // application taking the endpoint, a driver gone quiet) keeps
+                // running=true while nothing reaches the cable. Publish the
+                // stall so the message thread retries the output.
+                if (qpcSeconds() - lastRenderEventSeconds >= stallSeconds)
+                {
+                    setError (ErrorCode::streamStalled);
+                    return LoopExit::failed;
+                }
             }
             else
             {
@@ -1520,8 +1701,16 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
                           + juce::String (starvedEventCount.load (std::memory_order_relaxed))
                           + ")");
 
-        const bool reopened = escalateToPeriod > 0 ? reopenLowLatency (escalateToPeriod)
-                                                   : reopenStandardShared();
+        // A larger low-latency period first. If even that cannot be opened,
+        // the standard shared rung is still better than no audio at all, and
+        // the hint saved afterwards keeps the next launch on that rung.
+        bool reopened = false;
+
+        if (escalateToPeriod > 0)
+            reopened = reopenLowLatency (escalateToPeriod);
+
+        if (! reopened)
+            reopened = reopenStandardShared();
 
         if (! reopened)
         {
@@ -1531,7 +1720,10 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
         }
 
         StartupLog::mark ("output: reopened mode=" + juce::String (modeName (mode))
-                          + " period=" + juce::String (periodMs, 2) + " ms");
+                          + " period=" + juce::String (periodMs, 2) + " ms buffer="
+                          + juce::String ((int) bufferSize) + " frames ("
+                          + juce::String (1000.0 * bufferSize / deviceSampleRate, 2)
+                          + " ms)");
 
         exitReason = runRenderLoop();
     }
@@ -1539,6 +1731,8 @@ void WasapiOutputDevice::renderThread (juce::String deviceId, RingBuffer* buffer
     // ---- Shutdown ----
     if (mmcssHandle != nullptr)
         AvRevertMmThreadCharacteristics (mmcssHandle);
+
+    mmcssActive.store (false, std::memory_order_relaxed);
 
     if (audioClient != nullptr)
         audioClient->Stop();

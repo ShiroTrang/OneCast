@@ -1,18 +1,23 @@
 #pragma once
 #include <JuceHeader.h>
 
+#include <mutex>
+
 /** Lightweight start-up phase timing.
 
     Writes one file per launch to %APPDATA%/OneCast/startup.log. DBG() compiles
     out in Release builds and the debugger is not always attached, so this is the
     only practical way to find out which phase of start-up is slow.
 
-    mark() and flush() are message-thread only. The one look-alike is the
-    "output: mode=..." line WasapiOutputDevice::start() writes; start() runs on
-    the message thread and is still inside it when that line is written, just
-    blocked waiting for the render loop to begin (the render thread never calls
-    mark()). Keeping every call on one thread means the String append needs no
-    lock, which matters for a tray-resident app that logs for days.
+    mark() is called from the message thread and from the render thread's
+    non-real-time paths (before the render loop starts, and between loops when
+    it re-opens the endpoint). flush() stays message-thread only: the render
+    thread never touches the file system or the message thread's log state.
+    The text is a juce::String, which cannot be appended from two threads at
+    once, so both calls take a mutex. Neither call is reachable from a real-time
+    callback, and the render thread only marks a handful of times per stream
+    (start, MMCSS and a rare escalation), so the lock is never contended enough
+    to matter for a tray-resident app that logs for days.
 */
 namespace StartupLog
 {
@@ -29,6 +34,10 @@ namespace StartupLog
         double last  = first;
         juce::String text;
         int lineCount = 0;
+
+        /// Serialises mark() and flush(): the render thread's start-up and
+        /// re-open lines share this text with the message thread.
+        std::mutex mutex;
     };
 
     inline State& state()
@@ -41,6 +50,7 @@ namespace StartupLog
     inline void mark (const juce::String& what)
     {
         auto& s = state();
+        const std::lock_guard<std::mutex> lock (s.mutex);
         const double now = juce::Time::getMillisecondCounterHiRes();
 
         s.text << juce::String (now - s.last, 1).paddedLeft (' ', 9) << " ms  (t+"
@@ -84,6 +94,7 @@ namespace StartupLog
     inline void flush()
     {
         auto& s = state();
+        const std::lock_guard<std::mutex> lock (s.mutex);
 
         auto file = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
                         .getChildFile ("OneCast")
